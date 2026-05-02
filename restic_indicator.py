@@ -175,13 +175,19 @@ def _render_icon(state: BackupState, name: str, progress: float = -1.0) -> None:
 # ---------------------------------------------------------------------------
 _AUTOSTART_DIR = Path.home() / ".config" / "autostart"
 _AUTOSTART_FILE = _AUTOSTART_DIR / "restic-box.desktop"
-_MAIN_PY = Path(__file__).with_name("main.py").resolve()
+
+def _exec_command() -> str:
+    appimage = os.environ.get("APPIMAGE")
+    if appimage:
+        return appimage
+    return f"{sys.executable} {Path(__file__).with_name('main.py').resolve()}"
+
 _DESKTOP = f"""\
 [Desktop Entry]
 Type=Application
 Name=restic-box
 Comment=Restic backup tray applet
-Exec={sys.executable} {_MAIN_PY}
+Exec={_exec_command()}
 Terminal=false
 StartupNotify=false
 Categories=Utility;
