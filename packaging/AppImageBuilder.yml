@@ -100,4 +100,4 @@ AppImage:
   arch: x86_64
   update-information: None
   sign-key: None
-  file_name: !ENV restic-box${BUNDLE_SUFFIX}-${VERSION:-0.1.0}-x86_64.AppImage
+  file_name: !ENV restic-box${BUNDLE_SUFFIX}-${VERSION}-x86_64.AppImage
