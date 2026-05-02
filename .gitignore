@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+vendor/
+
+# AppImage build artifacts
+packaging/AppDir/
+packaging/*.AppImage
+packaging/appimage-builder-cache/
+packaging/restic
+
+# Editor
+.idea/
+.vscode/
+*.swp

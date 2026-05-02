@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=restic-box
+Comment=Restic backup tray applet for SSH storage boxes
+Exec=restic-box
+Icon=restic-box
+Type=Application
+Categories=Utility;System;
+Keywords=backup;restic;ssh;storagebox;
+StartupNotify=false

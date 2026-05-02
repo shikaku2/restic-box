@@ -1,0 +1,10 @@
+# Python dependencies for restic-box
+#
+# On Arch Linux, prefer system packages over pip to avoid C-extension conflicts:
+#   sudo pacman -S python-gobject python-cairo
+#
+# pip install is supported but requires the underlying system libraries
+# (glib2, cairo, gobject-introspection) to already be present.
+
+PyGObject>=3.42
+pycairo>=1.20
