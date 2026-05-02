@@ -10,7 +10,11 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        bundle_restic: ['0', '1']
+        include:
+          - bundle_restic: '0'
+            bundle_suffix: ''
+          - bundle_restic: '1'
+            bundle_suffix: '-bundled'
 
     steps:
       - uses: actions/checkout@v4
@@ -38,12 +42,13 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
           BUNDLE_RESTIC: ${{ matrix.bundle_restic }}
+          BUNDLE_SUFFIX: ${{ matrix.bundle_suffix }}
         run: appimage-builder --recipe AppImageBuilder.yml --skip-tests
 
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: appimage-bundle-${{ matrix.bundle_restic }}
+          name: appimage${{ matrix.bundle_suffix }}
           path: packaging/*.AppImage
 
   release:
