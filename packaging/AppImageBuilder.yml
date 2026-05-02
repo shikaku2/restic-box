@@ -19,8 +19,12 @@ script:
   # Copy app source into AppDir
   - mkdir -p AppDir/usr/share/restic-box
   - cp ../main.py ../restic_*.py AppDir/usr/share/restic-box/
-  - cp ../icon.png AppDir/restic-box.png
   - cp ../restic-box.desktop AppDir/
+
+  # Icon: AppDir root (AppImage metadata) + hicolor tree (appimage-builder lookup)
+  - cp ../icon.png AppDir/restic-box.png
+  - mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+  - cp ../icon.png AppDir/usr/share/icons/hicolor/256x256/apps/restic-box.png
 
   # Bundle restic binary when requested
   - |
