@@ -14,28 +14,6 @@ A GTK3 system-tray applet for [restic](https://restic.net/) backups to SSH stora
 - Sleep inhibition during active backups
 - Log window with live output
 
-## Requirements
-
-### System packages (Arch Linux)
-
-```
-sudo pacman -S restic python-gobject python-cairo
-# AUR: libayatana-appindicator  (or libappindicator-gtk3 from extra)
-```
-
-### System packages (Ubuntu / Debian)
-
-```
-sudo apt install restic python3-gi python3-gi-cairo python3-cairo \
-    gir1.2-gtk-3.0 gir1.2-appindicator3-0.1
-```
-
-### pip (after system GTK libs are present)
-
-```
-pip install PyGObject pycairo
-```
-
 ## Installation
 
 ### AppImage (recommended — no system Python deps needed)
@@ -62,7 +40,31 @@ cp restic-box-*.AppImage ~/.local/bin/restic-box
            cp $APPDIR/restic-box.png ~/.local/share/icons/'
 ```
 
-### From source
+Or right click the tray icon and check Run on Startup.  Checkmark supports both AppImage and running from source.
+
+## From source
+
+### Requirements
+
+### System packages (Arch Linux)
+
+```
+sudo pacman -S restic python-gobject python-cairo
+# AUR: libayatana-appindicator  (or libappindicator-gtk3 from extra)
+```
+
+### System packages (Ubuntu / Debian)
+
+```
+sudo apt install restic python3-gi python3-gi-cairo python3-cairo \
+    gir1.2-gtk-3.0 gir1.2-appindicator3-0.1
+```
+
+### pip (after system GTK libs are present)
+
+```
+pip install PyGObject pycairo
+```
 
 ```bash
 git clone https://github.com/Shikaku2/restic-box
