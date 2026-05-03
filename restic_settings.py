@@ -63,25 +63,103 @@ class SettingsDialog(Gtk.Dialog):
         g = self._grid()
         cfg = self._cfg
 
-        self._e_host = self._labeled_entry("SSH Host:", cfg.ssh_host, g, 0)
-        self._e_port = self._labeled_entry("SSH Port:", str(cfg.ssh_port), g, 1)
-        self._e_user = self._labeled_entry("SSH User:", cfg.ssh_user, g, 2)
-        self._e_key = self._labeled_entry("SSH Key:", cfg.ssh_key, g, 3)
+        g.attach(Gtk.Label(label="Backend:", xalign=1.0), 0, 0, 1, 1)
+        self._combo_backend = Gtk.ComboBoxText()
+        for opt in ("sftp", "local"):
+            self._combo_backend.append_text(opt)
+        self._combo_backend.set_active(0 if cfg.backend == "sftp" else 1)
+        self._combo_backend.set_hexpand(True)
+        g.attach(self._combo_backend, 1, 0, 1, 1)
 
-        btn_key = Gtk.Button(label="Browse…")
-        btn_key.connect("clicked", self._browse_key)
-        g.attach(btn_key, 2, 3, 1, 1)
+        self._lbl_host = Gtk.Label(label="SSH Host:", xalign=1.0)
+        self._lbl_host.set_no_show_all(True)
+        g.attach(self._lbl_host, 0, 1, 1, 1)
+        self._e_host = Gtk.Entry()
+        self._e_host.set_text(cfg.ssh_host)
+        self._e_host.set_hexpand(True)
+        self._e_host.set_no_show_all(True)
+        g.attach(self._e_host, 1, 1, 1, 1)
 
-        self._e_repo = self._labeled_entry("Repo Path:", cfg.repo_path, g, 4)
+        self._lbl_port = Gtk.Label(label="SSH Port:", xalign=1.0)
+        self._lbl_port.set_no_show_all(True)
+        g.attach(self._lbl_port, 0, 2, 1, 1)
+        self._e_port = Gtk.Entry()
+        self._e_port.set_text(str(cfg.ssh_port))
+        self._e_port.set_hexpand(True)
+        self._e_port.set_no_show_all(True)
+        g.attach(self._e_port, 1, 2, 1, 1)
 
-        btn_test = Gtk.Button(label="Test Connection")
-        btn_test.connect("clicked", self._test_connection)
-        g.attach(btn_test, 1, 5, 1, 1)
+        self._lbl_user = Gtk.Label(label="SSH User:", xalign=1.0)
+        self._lbl_user.set_no_show_all(True)
+        g.attach(self._lbl_user, 0, 3, 1, 1)
+        self._e_user = Gtk.Entry()
+        self._e_user.set_text(cfg.ssh_user)
+        self._e_user.set_hexpand(True)
+        self._e_user.set_no_show_all(True)
+        g.attach(self._e_user, 1, 3, 1, 1)
+
+        self._lbl_key = Gtk.Label(label="SSH Key:", xalign=1.0)
+        self._lbl_key.set_no_show_all(True)
+        g.attach(self._lbl_key, 0, 4, 1, 1)
+        self._e_key = Gtk.Entry()
+        self._e_key.set_text(cfg.ssh_key)
+        self._e_key.set_hexpand(True)
+        self._e_key.set_no_show_all(True)
+        g.attach(self._e_key, 1, 4, 1, 1)
+        self._btn_key = Gtk.Button(label="Browse…")
+        self._btn_key.connect("clicked", self._browse_key)
+        self._btn_key.set_no_show_all(True)
+        g.attach(self._btn_key, 2, 4, 1, 1)
+
+        self._lbl_repo = Gtk.Label(label="Repo Path:", xalign=1.0)
+        g.attach(self._lbl_repo, 0, 5, 1, 1)
+        self._e_repo = Gtk.Entry()
+        self._e_repo.set_text(cfg.repo_path)
+        self._e_repo.set_hexpand(True)
+        g.attach(self._e_repo, 1, 5, 1, 1)
+        self._btn_repo_browse = Gtk.Button(label="Browse…")
+        self._btn_repo_browse.connect("clicked", self._browse_repo_folder)
+        self._btn_repo_browse.set_no_show_all(True)
+        g.attach(self._btn_repo_browse, 2, 5, 1, 1)
+
+        self._btn_test = Gtk.Button(label="Test Connection")
+        self._btn_test.connect("clicked", self._test_connection)
+        self._btn_test.set_no_show_all(True)
+        g.attach(self._btn_test, 1, 6, 1, 1)
 
         self._lbl_test = Gtk.Label(label="")
-        g.attach(self._lbl_test, 1, 6, 2, 1)
+        self._lbl_test.set_no_show_all(True)
+        g.attach(self._lbl_test, 1, 7, 2, 1)
+
+        self._combo_backend.connect("changed", self._on_backend_changed)
+        self._on_backend_changed(self._combo_backend)
 
         return g
+
+    def _on_backend_changed(self, _combo: Gtk.ComboBoxText) -> None:
+        is_sftp = self._combo_backend.get_active_text() == "sftp"
+        for w in (self._lbl_host, self._e_host, self._lbl_port, self._e_port,
+                  self._lbl_user, self._e_user, self._lbl_key, self._e_key,
+                  self._btn_key, self._btn_test, self._lbl_test):
+            w.set_visible(is_sftp)
+        self._btn_repo_browse.set_visible(not is_sftp)
+
+    def _browse_repo_folder(self, _btn: Gtk.Button) -> None:
+        dlg = Gtk.FileChooserDialog(
+            title="Select local repository folder",
+            parent=self,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        dlg.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_OPEN, Gtk.ResponseType.OK,
+        )
+        current = self._e_repo.get_text().strip()
+        if current:
+            dlg.set_filename(current)
+        if dlg.run() == Gtk.ResponseType.OK:
+            self._e_repo.set_text(dlg.get_filename())
+        dlg.destroy()
 
     def _browse_key(self, _btn: Gtk.Button) -> None:
         dlg = Gtk.FileChooserDialog(
@@ -523,6 +601,7 @@ class SettingsDialog(Gtk.Dialog):
 
         return dataclasses.replace(
             self._cfg,
+            backend=self._combo_backend.get_active_text() or "sftp",
             ssh_host=self._e_host.get_text().strip(),
             ssh_port=port,
             ssh_user=self._e_user.get_text().strip(),

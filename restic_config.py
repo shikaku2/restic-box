@@ -20,6 +20,7 @@ class Directory:
 
 @dataclass
 class Config:
+    backend: str = "sftp"  # sftp | local
     ssh_host: str = ""
     ssh_port: int = 23
     ssh_user: str = ""

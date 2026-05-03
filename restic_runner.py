@@ -18,7 +18,7 @@ _ssh_config_done = False  # written once per process; SSH config rarely changes
 def ensure_ssh_config(cfg: Config) -> None:
     """Write the storage-box SSH alias to ~/.ssh/config if not already present."""
     global _ssh_config_done
-    if _ssh_config_done:
+    if cfg.backend != "sftp" or _ssh_config_done:
         return
     ssh_cfg = Path.home() / ".ssh" / "config"
     marker = f"Host {_SSH_ALIAS}"
@@ -42,6 +42,8 @@ def ensure_ssh_config(cfg: Config) -> None:
 
 
 def repo_url(cfg: Config) -> str:
+    if cfg.backend == "local":
+        return cfg.repo_path
     return f"sftp:{_SSH_ALIAS}:{cfg.repo_path}"
 
 
