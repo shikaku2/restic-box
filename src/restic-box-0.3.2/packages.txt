@@ -1,0 +1,19 @@
+# System package dependencies for restic-box
+# Arch Linux package names (pacman)
+
+# Core backup tool
+restic
+
+# Python GTK3 + GObject introspection bindings
+python-gobject   # gi, GLib, Gio, Gtk
+
+# Cairo rendering (tray icon)
+python-cairo     # cairo
+
+# AppIndicator3 tray support
+# Choose one — libayatana-appindicator is the actively maintained fork:
+libayatana-appindicator   # AUR: provides gir1.2 AppIndicator3-0.1
+# libappindicator-gtk3    # extra: older upstream, also works
+
+# FUSE — required for 'restic mount' and fusermount3 (used for unmounting)
+fuse3
