@@ -7,6 +7,7 @@ build/
 venv/
 vendor/
 commands.txt
+aur-restic-box/
 
 # makepkg artifacts
 pkg/
