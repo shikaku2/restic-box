@@ -1,6 +1,6 @@
 pkgbase = restic-box
 	pkgdesc = GTK3 AppIndicator tray applet for restic backups over SSH
-	pkgver = 0.3.2
+	pkgver = 0.3.3
 	pkgrel = 1
 	url = https://github.com/Shikaku2/restic-box
 	arch = any
@@ -8,12 +8,14 @@ pkgbase = restic-box
 	makedepends = python-build
 	makedepends = python-installer
 	makedepends = python-setuptools
+	depends = python
 	depends = restic
 	depends = libappindicator-gtk3
+	depends = hicolor-icon-theme
 	depends = python-gobject
 	depends = python-cairo
 	optdepends = fuse3: required for restic mount
-	source = restic-box-0.3.2.tar.gz::https://github.com/Shikaku2/restic-box/archive/refs/tags/v0.3.2.tar.gz
-	sha256sums = c138879d7d1ee44d6df26dfb40971cc1e763900fb4a78df49e24faf55d49ff6e
+	source = restic-box-0.3.3.tar.gz::https://github.com/Shikaku2/restic-box/archive/refs/tags/v0.3.3.tar.gz
+	sha256sums = f3d940c39a48cb7f260bf0e2ff27d04cc477b1901eda4a78451416f54170e759
 
 pkgname = restic-box

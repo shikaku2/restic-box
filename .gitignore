@@ -8,6 +8,12 @@ venv/
 vendor/
 commands.txt
 
+# makepkg artifacts
+pkg/
+src/
+*.pkg.tar.zst
+*.tar.gz
+
 # AppImage build artifacts
 packaging/AppDir/
 packaging/*.AppImage
