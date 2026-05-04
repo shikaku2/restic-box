@@ -2,7 +2,7 @@
 
 A GTK3 system-tray applet for [restic](https://restic.net/) backups to SSH storage boxes (e.g. Hetzner Storage Box).
 
-![restic-box tray icon](icon.png)
+![restic-box tray icon](icon.svg)
 
 ## Features
 
