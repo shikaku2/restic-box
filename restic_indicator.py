@@ -671,6 +671,9 @@ class ResticIndicator:
             if op is None:
                 break
             try:
+                if not runner.is_host_reachable(self._cfg):
+                    self._log(f"Skipping {op} — host {self._cfg.ssh_host} unreachable.")
+                    continue
                 if op == "backup":
                     self._run_backup()
                 elif op == "check":

@@ -41,13 +41,20 @@ class SettingsDialog(Gtk.Dialog):
     # --- helpers ---
 
     @staticmethod
-    def _labeled_entry(label: str, value: str, grid: Gtk.Grid, row: int) -> Gtk.Entry:
-        grid.attach(Gtk.Label(label=label, xalign=1.0), 0, row, 1, 1)
+    def _labeled_entry(
+        label: str, value: str, grid: Gtk.Grid, row: int, toggleable: bool = False
+    ) -> tuple[Gtk.Label, Gtk.Entry]:
+        lbl = Gtk.Label(label=label, xalign=1.0)
+        if toggleable:
+            lbl.set_no_show_all(True)
+        grid.attach(lbl, 0, row, 1, 1)
         entry = Gtk.Entry()
         entry.set_text(value)
         entry.set_hexpand(True)
+        if toggleable:
+            entry.set_no_show_all(True)
         grid.attach(entry, 1, row, 1, 1)
-        return entry
+        return lbl, entry
 
     @staticmethod
     def _grid() -> Gtk.Grid:
@@ -71,41 +78,10 @@ class SettingsDialog(Gtk.Dialog):
         self._combo_backend.set_hexpand(True)
         g.attach(self._combo_backend, 1, 0, 1, 1)
 
-        self._lbl_host = Gtk.Label(label="SSH Host:", xalign=1.0)
-        self._lbl_host.set_no_show_all(True)
-        g.attach(self._lbl_host, 0, 1, 1, 1)
-        self._e_host = Gtk.Entry()
-        self._e_host.set_text(cfg.ssh_host)
-        self._e_host.set_hexpand(True)
-        self._e_host.set_no_show_all(True)
-        g.attach(self._e_host, 1, 1, 1, 1)
-
-        self._lbl_port = Gtk.Label(label="SSH Port:", xalign=1.0)
-        self._lbl_port.set_no_show_all(True)
-        g.attach(self._lbl_port, 0, 2, 1, 1)
-        self._e_port = Gtk.Entry()
-        self._e_port.set_text(str(cfg.ssh_port))
-        self._e_port.set_hexpand(True)
-        self._e_port.set_no_show_all(True)
-        g.attach(self._e_port, 1, 2, 1, 1)
-
-        self._lbl_user = Gtk.Label(label="SSH User:", xalign=1.0)
-        self._lbl_user.set_no_show_all(True)
-        g.attach(self._lbl_user, 0, 3, 1, 1)
-        self._e_user = Gtk.Entry()
-        self._e_user.set_text(cfg.ssh_user)
-        self._e_user.set_hexpand(True)
-        self._e_user.set_no_show_all(True)
-        g.attach(self._e_user, 1, 3, 1, 1)
-
-        self._lbl_key = Gtk.Label(label="SSH Key:", xalign=1.0)
-        self._lbl_key.set_no_show_all(True)
-        g.attach(self._lbl_key, 0, 4, 1, 1)
-        self._e_key = Gtk.Entry()
-        self._e_key.set_text(cfg.ssh_key)
-        self._e_key.set_hexpand(True)
-        self._e_key.set_no_show_all(True)
-        g.attach(self._e_key, 1, 4, 1, 1)
+        self._lbl_host, self._e_host = self._labeled_entry("SSH Host:", cfg.ssh_host, g, 1, toggleable=True)
+        self._lbl_port, self._e_port = self._labeled_entry("SSH Port:", str(cfg.ssh_port), g, 2, toggleable=True)
+        self._lbl_user, self._e_user = self._labeled_entry("SSH User:", cfg.ssh_user, g, 3, toggleable=True)
+        self._lbl_key, self._e_key = self._labeled_entry("SSH Key:", cfg.ssh_key, g, 4, toggleable=True)
         self._btn_key = Gtk.Button(label="Browse…")
         self._btn_key.connect("clicked", self._browse_key)
         self._btn_key.set_no_show_all(True)
@@ -144,37 +120,30 @@ class SettingsDialog(Gtk.Dialog):
             w.set_visible(is_sftp)
         self._btn_repo_browse.set_visible(not is_sftp)
 
-    def _browse_repo_folder(self, _btn: Gtk.Button) -> None:
-        dlg = Gtk.FileChooserDialog(
-            title="Select local repository folder",
-            parent=self,
-            action=Gtk.FileChooserAction.SELECT_FOLDER,
-        )
-        dlg.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_OPEN, Gtk.ResponseType.OK,
-        )
-        current = self._e_repo.get_text().strip()
-        if current:
-            dlg.set_filename(current)
+    def _pick_path(
+        self,
+        entry: Gtk.Entry,
+        title: str,
+        action: Gtk.FileChooserAction,
+        initial_folder: str | None = None,
+    ) -> None:
+        dlg = Gtk.FileChooserDialog(title=title, parent=self, action=action)
+        ok_stock = Gtk.STOCK_SAVE if action == Gtk.FileChooserAction.SAVE else Gtk.STOCK_OPEN
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, ok_stock, Gtk.ResponseType.OK)
+        start = entry.get_text().strip()
+        if action == Gtk.FileChooserAction.SELECT_FOLDER and start:
+            dlg.set_filename(start)
+        elif initial_folder:
+            dlg.set_current_folder(initial_folder)
         if dlg.run() == Gtk.ResponseType.OK:
-            self._e_repo.set_text(dlg.get_filename())
+            entry.set_text(dlg.get_filename())
         dlg.destroy()
 
+    def _browse_repo_folder(self, _btn: Gtk.Button) -> None:
+        self._pick_path(self._e_repo, "Select local repository folder", Gtk.FileChooserAction.SELECT_FOLDER)
+
     def _browse_key(self, _btn: Gtk.Button) -> None:
-        dlg = Gtk.FileChooserDialog(
-            title="Select SSH private key",
-            parent=self,
-            action=Gtk.FileChooserAction.OPEN,
-        )
-        dlg.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_OPEN, Gtk.ResponseType.OK,
-        )
-        dlg.set_current_folder(str(Path.home() / ".ssh"))
-        if dlg.run() == Gtk.ResponseType.OK:
-            self._e_key.set_text(dlg.get_filename())
-        dlg.destroy()
+        self._pick_path(self._e_key, "Select SSH private key", Gtk.FileChooserAction.OPEN, str(Path.home() / ".ssh"))
 
     def _test_connection(self, _btn: Gtk.Button) -> None:
         self._lbl_test.set_text("Testing…")
@@ -217,7 +186,7 @@ class SettingsDialog(Gtk.Dialog):
         g = self._grid()
         cfg = self._cfg
 
-        self._e_pwfile = self._labeled_entry("Password File:", cfg.password_file, g, 0)
+        _, self._e_pwfile = self._labeled_entry("Password File:", cfg.password_file, g, 0)
 
         btn_browse_pw = Gtk.Button(label="Browse…")
         btn_browse_pw.connect("clicked", self._browse_pwfile)
@@ -256,18 +225,7 @@ class SettingsDialog(Gtk.Dialog):
         return "Password file: EXISTS" if exists else "Password file: NOT FOUND"
 
     def _browse_pwfile(self, _btn: Gtk.Button) -> None:
-        dlg = Gtk.FileChooserDialog(
-            title="Select password file",
-            parent=self,
-            action=Gtk.FileChooserAction.SAVE,
-        )
-        dlg.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_SAVE, Gtk.ResponseType.OK,
-        )
-        if dlg.run() == Gtk.ResponseType.OK:
-            self._e_pwfile.set_text(dlg.get_filename())
-        dlg.destroy()
+        self._pick_path(self._e_pwfile, "Select password file", Gtk.FileChooserAction.SAVE)
 
     def _generate_password(self, _btn: Gtk.Button) -> None:
         self._cfg.password_file = self._e_pwfile.get_text().strip()

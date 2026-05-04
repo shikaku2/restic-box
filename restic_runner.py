@@ -5,6 +5,7 @@ RC_OK = 0
 RC_PARTIAL = 3  # some source files unreadable — backup still created
 
 import json
+import socket
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -39,6 +40,17 @@ def ensure_ssh_config(cfg: Config) -> None:
             f.write(entry)
         ssh_cfg.chmod(0o600)
     _ssh_config_done = True
+
+
+def is_host_reachable(cfg: Config) -> bool:
+    """TCP-probe the SFTP host; always True for local backend."""
+    if cfg.backend != "sftp":
+        return True
+    try:
+        with socket.create_connection((cfg.ssh_host, cfg.ssh_port), timeout=3):
+            return True
+    except OSError:
+        return False
 
 
 def repo_url(cfg: Config) -> str:
