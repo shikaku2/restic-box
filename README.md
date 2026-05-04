@@ -40,7 +40,7 @@ cp restic-box-*.AppImage ~/.local/bin/restic-box
            cp $APPDIR/restic-box.png ~/.local/share/icons/'
 ```
 
-Or right click the tray icon and check Run on Startup.  Checkmark supports both AppImage and running from source.
+Or run the program and right click the tray icon and check Run on Startup.  Checkmark supports both AppImage and running from source.
 
 ## From source
 
