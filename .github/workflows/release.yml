@@ -40,6 +40,13 @@ jobs:
       - name: Install appimage-builder
         run: pip install appimage-builder
 
+      - name: Cache appimage-builder apt packages
+        uses: actions/cache@v4
+        with:
+          path: packaging/appimage-builder-cache
+          key: appimage-builder-${{ hashFiles('packaging/AppImageBuilder.yml') }}
+          restore-keys: appimage-builder-
+
       - name: Build AppImage
         working-directory: packaging
         env:
