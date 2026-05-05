@@ -1,8 +1,8 @@
 # Maintainer: Aaron <aarongonzal@gmail.com>
 
 pkgname=restic-box
-pkgver=0.3.4
-pkgrel=2
+pkgver=0.3.5
+pkgrel=1
 pkgdesc="A simple GTK3 tray applet for restic backups over SSH or local/mounted directory"
 arch=('any')
 url="https://github.com/Shikaku2/restic-box"
