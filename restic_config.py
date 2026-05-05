@@ -49,9 +49,6 @@ class Config:
     retention_hours: int = 0
     directories: list[Directory] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
-        return asdict(self)
-
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
         raw_dirs = d.get("directories", [])
@@ -72,7 +69,7 @@ def load_config() -> Config:
 def save_config(cfg: Config) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg.to_dict(), f, indent=2)
+        json.dump(asdict(cfg), f, indent=2)
 
 
 def password_file_path(cfg: Config) -> Path:

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import traceback
+from collections import defaultdict
 from datetime import date, datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -494,6 +495,7 @@ class ResticIndicator:
         self._backup_item_index: int = 0
         self._backup_item_count: int = 0
         self._mount_proc: subprocess.Popen | None = None
+        self._stop_requested = threading.Event()
 
         icon_name = self._next_icon_name()
         _render_icon(self._state, icon_name)
@@ -671,6 +673,7 @@ class ResticIndicator:
             if op is None:
                 break
             try:
+                self._stop_requested.clear()
                 if not runner.is_host_reachable(self._cfg):
                     self._log(f"Skipping {op} — host {self._cfg.ssh_host} unreachable.")
                     continue
@@ -727,6 +730,10 @@ class ResticIndicator:
                     self._log(f"ERROR: backup of {d.path} failed (rc={rc})")
                 if rc in (runner.RC_OK, runner.RC_PARTIAL):
                     run_total_size += self._current_backup_total
+                if self._stop_requested.is_set():
+                    self._log("Backup stopped by user — remaining directories skipped.")
+                    GLib.idle_add(self._set_state, BackupState.IDLE, "Stopped")
+                    return
 
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
             if all_ok:
@@ -771,7 +778,10 @@ class ResticIndicator:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         if rc in (runner.RC_OK, runner.RC_PARTIAL):
             GLib.idle_add(self._set_state, BackupState.SUCCESS, f"Check OK at {ts}{subset_info}")
-            n = self._cfg.check_subset_current % self._cfg.check_subset_total + 1 if self._cfg.check_read_data_subset else self._cfg.check_subset_current
+            if self._cfg.check_read_data_subset:
+                n = self._cfg.check_subset_current % self._cfg.check_subset_total + 1
+            else:
+                n = self._cfg.check_subset_current
             self._cfg = dataclasses.replace(self._cfg, check_subset_current=n, last_check_ts=time.time())
             cfg_mod.save_config(self._cfg)
         else:
@@ -797,7 +807,7 @@ class ResticIndicator:
     # --- unlock / stop all ---
 
     def _stop_and_unlock(self) -> None:
-        """Clear the queue, kill current process, then unlock."""
+        self._stop_requested.set()
         self._clear_queue()
         if self._current_proc and self._current_proc.poll() is None:
             self._log("Stopping current restic process…")
@@ -886,9 +896,6 @@ class ResticIndicator:
     def _build_bydate(self, snaps: list[dict]) -> None:
         shutil.rmtree(_BYDATE_PATH, ignore_errors=True)
         _BYDATE_PATH.mkdir(parents=True)
-        # Group snapshots by (date, minute) key
-        # minute_groups: date → {time_key → [(orig_path, snap_id)]}
-        from collections import defaultdict
         minute_groups: dict[str, dict[str, list[tuple[str, str]]]] = defaultdict(dict)
         for snap in snaps:
             t = snap.get("time", "")

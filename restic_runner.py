@@ -164,18 +164,6 @@ def fmt_bytes(n: float) -> str:
     return f"{n:.1f} PB"
 
 
-def run_backup_all(
-    cfg: Config,
-    on_output: OutputCallback = None,
-    on_progress: ProgressCallback = None,
-) -> list[tuple[str, int, str]]:
-    """Backup all enabled directories. Returns [(path, returncode, output)]."""
-    return [
-        (d.path, *run_backup(cfg, d, on_output, on_progress))
-        for d in cfg.directories
-        if d.enabled
-    ]
-
 
 def run_check(cfg: Config, on_output: OutputCallback = None, on_proc: ProcCallback = None) -> tuple[int, str]:
     ensure_ssh_config(cfg)

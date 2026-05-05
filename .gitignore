@@ -25,3 +25,4 @@ packaging/restic
 .idea/
 .vscode/
 *.swp
+.claude/
