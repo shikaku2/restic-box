@@ -13,6 +13,5 @@ dependencies = ["PyGObject>=3.42", "pycairo>=1.20"]
 [project.scripts]
 restic-box = "restic_indicator:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["restic*"]
+[tool.setuptools]
+py-modules = ["restic_indicator", "restic_runner", "restic_config", "restic_settings", "restic_status"]
