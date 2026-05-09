@@ -65,10 +65,20 @@ _MOUNT_DIR      = Path.home() / ".cache" / "restic" / "mount"
 _RAW_MOUNT_PATH = _MOUNT_DIR / "snapshots"   # actual restic FUSE mount
 _LATEST_PATH    = _MOUNT_DIR / "latest"
 _BYDATE_PATH    = _MOUNT_DIR / "bydate"
+_MOUNT_FRAMES   = ("Mounting ·", "Mounting ··", "Mounting ···")
 _ICON_DIR = tempfile.mkdtemp(prefix="restic-box-")
 _ICON_SLOT = ("a", "b")
 
 ICON_SIZE = 64
+
+
+def _set_tree_readonly(path: Path, readonly: bool) -> None:
+    """Recursively chmod directories under path to 0o555 (readonly) or 0o755."""
+    if not path.exists():
+        return
+    mode = 0o555 if readonly else 0o755
+    for root, dirs, _ in os.walk(str(path)):
+        os.chmod(root, mode)
 
 
 class BackupState(Enum):
@@ -835,14 +845,26 @@ class ResticIndicator:
 
     def _mount_backup(self) -> None:
         _RAW_MOUNT_PATH.mkdir(parents=True, exist_ok=True)
-        GLib.idle_add(self._item_mount.set_label, "Unmount Backup")
-        GLib.idle_add(self._item_mount.set_sensitive, False)
+        self._mount_frame = 0
+        self._item_mount.set_label(_MOUNT_FRAMES[0])
+        self._item_mount.set_sensitive(False)
+        self._mount_spinner_id: int | None = GLib.timeout_add(500, self._tick_mount_label)
         threading.Thread(target=self._run_mount, daemon=True).start()
+
+    def _tick_mount_label(self) -> bool:
+        self._mount_frame = (self._mount_frame + 1) % len(_MOUNT_FRAMES)
+        self._item_mount.set_label(_MOUNT_FRAMES[self._mount_frame])
+        return True
+
+    def _stop_mount_spinner(self) -> None:
+        sid = getattr(self, "_mount_spinner_id", None)
+        if sid is not None:
+            GLib.source_remove(sid)
+            self._mount_spinner_id = None
 
     def _run_mount(self) -> None:
         try:
             self._mount_proc = runner.start_mount(self._cfg, str(_RAW_MOUNT_PATH))
-            GLib.idle_add(self._item_mount.set_sensitive, True)
             assert self._mount_proc.stdout is not None
             for line in self._mount_proc.stdout:
                 line = line.rstrip()
@@ -850,6 +872,9 @@ class ResticIndicator:
                     self._log(f"[mount] {line}")
                     if "serving" in line.lower():
                         self._build_friendly_views()
+                        GLib.idle_add(self._stop_mount_spinner)
+                        GLib.idle_add(self._item_mount.set_label, "Unmount Backup")
+                        GLib.idle_add(self._item_mount.set_sensitive, True)
                         subprocess.Popen(["xdg-open", str(_MOUNT_DIR)])
                         self._log(f"Mounted at {_MOUNT_DIR}")
             rc = self._mount_proc.wait()
@@ -859,8 +884,11 @@ class ResticIndicator:
             self._log(f"Mount failed: {e}")
         finally:
             self._mount_proc = None
+            _set_tree_readonly(_LATEST_PATH, False)
+            _set_tree_readonly(_BYDATE_PATH, False)
             shutil.rmtree(_LATEST_PATH, ignore_errors=True)
             shutil.rmtree(_BYDATE_PATH, ignore_errors=True)
+            GLib.idle_add(self._stop_mount_spinner)
             GLib.idle_add(self._item_mount.set_label, "Mount Backup")
             GLib.idle_add(self._item_mount.set_sensitive, True)
             self._log("Unmounted.")
@@ -879,6 +907,7 @@ class ResticIndicator:
             self._log(f"[mount] Could not build friendly views: {e}")
 
     def _build_latest(self, snaps: list[dict]) -> None:
+        _set_tree_readonly(_LATEST_PATH, False)
         shutil.rmtree(_LATEST_PATH, ignore_errors=True)
         _LATEST_PATH.mkdir(parents=True)
         sorted_snaps = sorted(snaps, key=lambda s: s.get("time", ""))
@@ -892,8 +921,10 @@ class ResticIndicator:
             dst = _LATEST_PATH / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.symlink_to(src)
+        _set_tree_readonly(_LATEST_PATH, True)
 
     def _build_bydate(self, snaps: list[dict]) -> None:
+        _set_tree_readonly(_BYDATE_PATH, False)
         shutil.rmtree(_BYDATE_PATH, ignore_errors=True)
         _BYDATE_PATH.mkdir(parents=True)
         minute_groups: dict[str, dict[str, list[tuple[str, str]]]] = defaultdict(dict)
@@ -935,6 +966,7 @@ class ResticIndicator:
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     if not dst.exists():
                         dst.symlink_to(src)
+        _set_tree_readonly(_BYDATE_PATH, True)
 
     # --- backup scheduler ---
 
