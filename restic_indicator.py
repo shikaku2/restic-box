@@ -217,6 +217,13 @@ def _set_autostart(enabled: bool) -> None:
         _AUTOSTART_FILE.unlink(missing_ok=True)
 
 
+def _notify(msg: str) -> None:
+    subprocess.Popen(
+        ["notify-send", "-a", "restic-box", "restic-box", msg],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Snapshot browser
 # ---------------------------------------------------------------------------
@@ -490,7 +497,7 @@ class ResticIndicator:
         else:
             self._state = BackupState.IDLE
             self._last_msg = "Never backed up"
-        self._op_queue: queue.Queue[str | None] = queue.Queue()
+        self._op_queue: queue.Queue[tuple[str, bool] | None] = queue.Queue()
         self._queued: set[str] = set()
         self._queue_lock = threading.Lock()
         self._log_cooldown: dict[str, float] = {}  # message → last_log_timestamp
@@ -505,6 +512,8 @@ class ResticIndicator:
         self._backup_item_index: int = 0
         self._backup_item_count: int = 0
         self._mount_proc: subprocess.Popen | None = None
+        self._mount_spinner_id: int | None = None
+        self._mount_frame: int = 0
         self._stop_requested = threading.Event()
 
         icon_name = self._next_icon_name()
@@ -640,12 +649,13 @@ class ResticIndicator:
 
     def _log(self, text: str) -> None:
         # Deduplicate scheduler messages (1-hour cooldown)
-        should_skip = text.startswith("Scheduled") or "already queued" in text
+        should_skip = text.startswith("Scheduled") or text.startswith("Skipped") or "already queued" in text
         if should_skip:
             now = time.time()
             if text in self._log_cooldown:
-                if now - self._log_cooldown[text] < 3600:  # 1 hour
+                if now - self._log_cooldown[text] < 3600:
                     return
+            self._log_cooldown = {k: v for k, v in self._log_cooldown.items() if now - v < 3600}
             self._log_cooldown[text] = now
         ts = datetime.now().strftime("%H:%M:%S")
         GLib.idle_add(self._log_window.append, f"[{ts}] {text}")
@@ -660,13 +670,13 @@ class ResticIndicator:
 
     # --- operation queue & backup ---
 
-    def _enqueue(self, op: str) -> None:
+    def _enqueue(self, op: str, automatic: bool = False) -> None:
         with self._queue_lock:
             if op in self._queued:
                 self._log(f"{op} already queued — skipping duplicate.")
                 return
             self._queued.add(op)
-        self._op_queue.put(op)
+        self._op_queue.put((op, automatic))
 
     def _clear_queue(self) -> None:
         with self._queue_lock:
@@ -679,20 +689,21 @@ class ResticIndicator:
 
     def _op_worker(self) -> None:
         while True:
-            op = self._op_queue.get()
-            if op is None:
+            item = self._op_queue.get()
+            if item is None:
                 break
+            op, automatic = item
             try:
                 self._stop_requested.clear()
                 if not runner.is_host_reachable(self._cfg):
                     self._log(f"Skipping {op} — host {self._cfg.ssh_host} unreachable.")
                     continue
                 if op == "backup":
-                    self._run_backup()
+                    self._run_backup(automatic)
                 elif op == "check":
-                    self._run_check()
+                    self._run_check(automatic)
                 elif op == "check_full":
-                    self._run_full_check()
+                    self._run_full_check(automatic)
                 elif op == "unlock":
                     self._run_unlock()
             except Exception:
@@ -701,10 +712,24 @@ class ResticIndicator:
                 with self._queue_lock:
                     self._queued.discard(op)
 
-    def _trigger_backup(self) -> None:
-        self._enqueue("backup")
+    def _trigger_backup(self, automatic: bool = False) -> None:
+        self._enqueue("backup", automatic)
 
-    def _run_backup(self) -> None:
+    def _mount_active(self) -> bool:
+        return bool(self._mount_proc and self._mount_proc.poll() is None)
+
+    def _skip_if_mounted(self, op: str, automatic: bool) -> bool:
+        if not self._mount_active():
+            return False
+        if automatic:
+            self._log(f"Skipped {op} — mount is active.")
+        else:
+            _notify(f"Cannot {op} while mount is active. Unmount first.")
+        return True
+
+    def _run_backup(self, automatic: bool = False) -> None:
+        if self._skip_if_mounted("backup", automatic):
+            return
         inhibit_fd = _inhibit_sleep()
         try:
             dirs = [d for d in self._cfg.directories if d.enabled]
@@ -774,11 +799,18 @@ class ResticIndicator:
 
     # --- check ---
 
-    def _trigger_check(self) -> None:
-        self._enqueue("check")
+    def _trigger_check(self, automatic: bool = False) -> None:
+        self._enqueue("check", automatic)
 
-    def _run_check(self) -> None:
+    def _run_check(self, automatic: bool = False) -> None:
+        if self._skip_if_mounted("check", automatic):
+            return
         GLib.idle_add(self._set_state, BackupState.CHECKING, "Checking repo…")
+        if (self._cfg.check_read_data_subset
+                and self._cfg.check_subset_current > self._cfg.check_subset_total):
+            self._cfg = dataclasses.replace(self._cfg, check_subset_current=1)
+            cfg_mod.save_config(self._cfg)
+            self._log("Subset index reset to 1 (total was reduced).")
         subset_info = ""
         if self._cfg.check_read_data_subset:
             n, t = self._cfg.check_subset_current, self._cfg.check_subset_total
@@ -798,10 +830,12 @@ class ResticIndicator:
             GLib.idle_add(self._set_state, BackupState.ERROR, f"Check FAILED at {ts}")
         self._log(f"=== restic check finished (rc={rc}) at {ts} ===")
 
-    def _trigger_full_check(self) -> None:
-        self._enqueue("check_full")
+    def _trigger_full_check(self, automatic: bool = False) -> None:
+        self._enqueue("check_full", automatic)
 
-    def _run_full_check(self) -> None:
+    def _run_full_check(self, automatic: bool = False) -> None:
+        if self._skip_if_mounted("full check", automatic):
+            return
         GLib.idle_add(self._set_state, BackupState.CHECKING, "Checking repo (all data)…")
         self._log("=== restic check --read-data started ===")
         rc, _out = runner.run_check_full(self._cfg, on_output=self._log, on_proc=self._set_current_proc)
@@ -843,12 +877,24 @@ class ResticIndicator:
         else:
             self._mount_backup()
 
+    def _cleanup_stale_mount(self) -> None:
+        """Unmount a stale FUSE endpoint and remove leftover friendly-view trees."""
+        subprocess.run(["fusermount3", "-u", str(_RAW_MOUNT_PATH)], capture_output=True)
+        _set_tree_readonly(_LATEST_PATH, False)
+        shutil.rmtree(_LATEST_PATH, ignore_errors=True)
+        _set_tree_readonly(_BYDATE_PATH, False)
+        shutil.rmtree(_BYDATE_PATH, ignore_errors=True)
+
     def _mount_backup(self) -> None:
+        if self._current_proc and self._current_proc.poll() is None:
+            _notify("Can't mount yet — backup/check in progress. Stop it first to allow mounts.")
+            return
+        self._cleanup_stale_mount()
         _RAW_MOUNT_PATH.mkdir(parents=True, exist_ok=True)
         self._mount_frame = 0
         self._item_mount.set_label(_MOUNT_FRAMES[0])
         self._item_mount.set_sensitive(False)
-        self._mount_spinner_id: int | None = GLib.timeout_add(500, self._tick_mount_label)
+        self._mount_spinner_id = GLib.timeout_add(500, self._tick_mount_label)
         threading.Thread(target=self._run_mount, daemon=True).start()
 
     def _tick_mount_label(self) -> bool:
@@ -857,9 +903,8 @@ class ResticIndicator:
         return True
 
     def _stop_mount_spinner(self) -> None:
-        sid = getattr(self, "_mount_spinner_id", None)
-        if sid is not None:
-            GLib.source_remove(sid)
+        if self._mount_spinner_id is not None:
+            GLib.source_remove(self._mount_spinner_id)
             self._mount_spinner_id = None
 
     def _run_mount(self) -> None:
@@ -884,10 +929,7 @@ class ResticIndicator:
             self._log(f"Mount failed: {e}")
         finally:
             self._mount_proc = None
-            _set_tree_readonly(_LATEST_PATH, False)
-            _set_tree_readonly(_BYDATE_PATH, False)
-            shutil.rmtree(_LATEST_PATH, ignore_errors=True)
-            shutil.rmtree(_BYDATE_PATH, ignore_errors=True)
+            self._cleanup_stale_mount()
             GLib.idle_add(self._stop_mount_spinner)
             GLib.idle_add(self._item_mount.set_label, "Mount Backup")
             GLib.idle_add(self._item_mount.set_sensitive, True)
@@ -988,7 +1030,7 @@ class ResticIndicator:
     def _schedule_backup(self) -> bool:
         if self._backup_due():
             self._log("Scheduled backup triggered.")
-            self._trigger_backup()
+            self._trigger_backup(automatic=True)
         return True
 
     # --- daily check scheduler ---
@@ -1007,7 +1049,7 @@ class ResticIndicator:
     def _schedule_check(self) -> bool:
         if self._check_due():
             self._log("Scheduled check — running restic check.")
-            self._trigger_check()
+            self._trigger_check(automatic=True)
         return True  # keep repeating
 
     # --- settings ---
@@ -1024,16 +1066,17 @@ class ResticIndicator:
     # --- start / quit ---
 
     def start(self) -> None:
+        threading.Thread(target=self._cleanup_stale_mount, daemon=True).start()
         GLib.timeout_add_seconds(60, self._schedule_backup)
         GLib.timeout_add_seconds(60, self._schedule_check)
         if self._cfg.backup_on_startup:
-            self._trigger_backup()
+            self._trigger_backup(automatic=True)
         elif self._backup_due():
             self._log("Backup overdue — running.")
-            self._trigger_backup()
+            self._trigger_backup(automatic=True)
         if self._check_due():
             self._log("Check overdue — running restic check.")
-            self._trigger_check()
+            self._trigger_check(automatic=True)
         self._log("restic-box started.")
 
     def _set_current_proc(self, proc: subprocess.Popen) -> None:
