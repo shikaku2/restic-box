@@ -24,8 +24,8 @@ Download the latest release from the [Releases page](../../releases):
 | Variant | Description |
 |---|---|
 | `restic-box-vX.Y.Z-x86_64.AppImage` | Requires `restic` on your `$PATH` |
-| `restic-box-bundled-vX.Y.Z-x86_64.AppImage` | Includes restic binary |
-| `restic-box-bundled-rclone-vX.Y.Z-x86_64.AppImage` | Includes restic and rclone binaries |
+| `restic-box-bundled-restic-vX.Y.Z-x86_64.AppImage` | Includes restic binary |
+| `restic-box-bundled-restic-rclone-vX.Y.Z-x86_64.AppImage` | Includes restic and rclone binaries |
 
 ```bash
 chmod +x restic-box-*.AppImage
@@ -106,10 +106,10 @@ cd packaging
 VERSION=0.1.0 BUNDLE_RESTIC=0 appimage-builder --recipe AppImageBuilder.yml --skip-tests
 
 # With bundled restic:
-VERSION=0.1.0 BUNDLE_RESTIC=1 BUNDLE_SUFFIX=-bundled appimage-builder --recipe AppImageBuilder.yml --skip-tests
+VERSION=0.1.0 BUNDLE_RESTIC=1 BUNDLE_SUFFIX=-bundled-restic appimage-builder --recipe AppImageBuilder.yml --skip-tests
 
 # With bundled restic and rclone:
-VERSION=0.1.0 BUNDLE_RESTIC=1 BUNDLE_RCLONE=1 BUNDLE_SUFFIX=-bundled-rclone \
+VERSION=0.1.0 BUNDLE_RESTIC=1 BUNDLE_RCLONE=1 BUNDLE_SUFFIX=-bundled-restic-rclone \
     appimage-builder --recipe AppImageBuilder.yml --skip-tests
 ```
 

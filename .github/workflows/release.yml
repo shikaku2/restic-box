@@ -19,10 +19,10 @@ jobs:
             bundle_suffix: ''
           - bundle_restic: '1'
             bundle_rclone: '0'
-            bundle_suffix: '-bundled'
+            bundle_suffix: '-bundled-restic'
           - bundle_restic: '1'
             bundle_rclone: '1'
-            bundle_suffix: '-bundled-rclone'
+            bundle_suffix: '-bundled-restic-rclone'
 
     steps:
       - uses: actions/checkout@v4
