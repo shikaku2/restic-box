@@ -159,6 +159,13 @@ class SettingsDialog(Gtk.Dialog):
 
     def _load_rclone_remotes_worker(self, current: str) -> None:
         remotes = runner.list_rclone_remotes()
+        if remotes is None:
+            subprocess.Popen(
+                ["notify-send", "-a", "restic-box", "restic-box",
+                 "rclone is not installed — install it to use rclone backends"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            remotes = []
         GLib.idle_add(self._set_rclone_remotes, remotes, current)
 
     def _set_rclone_remotes(self, remotes: list[str], current: str) -> bool:

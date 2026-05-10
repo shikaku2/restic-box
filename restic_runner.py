@@ -62,7 +62,8 @@ def repo_url(cfg: Config) -> str:
     return f"sftp:{_SSH_ALIAS}:{cfg.repo_path}"
 
 
-def list_rclone_remotes() -> list[str]:
+def list_rclone_remotes() -> list[str] | None:
+    """Return list of remotes, or None if rclone is not installed."""
     try:
         result = subprocess.run(
             ["rclone", "listremotes"],
@@ -70,6 +71,8 @@ def list_rclone_remotes() -> list[str]:
             text=True,
             timeout=10,
         )
+    except FileNotFoundError:
+        return None
     except Exception:
         return []
     if result.returncode != 0:

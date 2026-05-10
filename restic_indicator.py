@@ -902,6 +902,9 @@ class ResticIndicator:
         if self._current_proc and self._current_proc.poll() is None:
             _notify("Can't mount yet — backup/check in progress. Stop it first to allow mounts.")
             return
+        if not shutil.which("fusermount3"):
+            _notify("fuse3 is not installed — install it to use the mount feature")
+            return
         self._cleanup_stale_mount()
         _RAW_MOUNT_PATH.mkdir(parents=True, exist_ok=True)
         self._mount_frame = 0
