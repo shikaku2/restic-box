@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import shlex
+import shutil
 import subprocess
+import tempfile
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -27,6 +32,8 @@ class SettingsDialog(Gtk.Dialog):
         self.add_button("_Save", Gtk.ResponseType.OK)
 
         self._cfg = cfg
+        self._rclone_remotes_loaded = False
+        self._rclone_remotes_loading = False
         notebook = Gtk.Notebook()
         self.get_content_area().pack_start(notebook, True, True, 0)
 
@@ -72,9 +79,11 @@ class SettingsDialog(Gtk.Dialog):
 
         g.attach(Gtk.Label(label="Backend:", xalign=1.0), 0, 0, 1, 1)
         self._combo_backend = Gtk.ComboBoxText()
-        for opt in ("sftp", "local"):
+        backend_options = ("sftp", "local", "rclone")
+        for opt in backend_options:
             self._combo_backend.append_text(opt)
-        self._combo_backend.set_active(0 if cfg.backend == "sftp" else 1)
+        active_backend = backend_options.index(cfg.backend) if cfg.backend in backend_options else 0
+        self._combo_backend.set_active(active_backend)
         self._combo_backend.set_hexpand(True)
         g.attach(self._combo_backend, 1, 0, 1, 1)
 
@@ -87,25 +96,37 @@ class SettingsDialog(Gtk.Dialog):
         self._btn_key.set_no_show_all(True)
         g.attach(self._btn_key, 2, 4, 1, 1)
 
+        self._lbl_rclone_remote = Gtk.Label(label="Rclone Remote:", xalign=1.0)
+        self._lbl_rclone_remote.set_no_show_all(True)
+        g.attach(self._lbl_rclone_remote, 0, 5, 1, 1)
+        self._combo_rclone_remote = Gtk.ComboBoxText()
+        self._combo_rclone_remote.set_hexpand(True)
+        self._combo_rclone_remote.set_no_show_all(True)
+        g.attach(self._combo_rclone_remote, 1, 5, 1, 1)
+        self._btn_rclone_config = Gtk.Button(label="Configure rclone remotes…")
+        self._btn_rclone_config.connect("clicked", self._configure_rclone)
+        self._btn_rclone_config.set_no_show_all(True)
+        g.attach(self._btn_rclone_config, 2, 5, 1, 1)
+
         self._lbl_repo = Gtk.Label(label="Repo Path:", xalign=1.0)
-        g.attach(self._lbl_repo, 0, 5, 1, 1)
+        g.attach(self._lbl_repo, 0, 6, 1, 1)
         self._e_repo = Gtk.Entry()
         self._e_repo.set_text(cfg.repo_path)
         self._e_repo.set_hexpand(True)
-        g.attach(self._e_repo, 1, 5, 1, 1)
+        g.attach(self._e_repo, 1, 6, 1, 1)
         self._btn_repo_browse = Gtk.Button(label="Browse…")
         self._btn_repo_browse.connect("clicked", self._browse_repo_folder)
         self._btn_repo_browse.set_no_show_all(True)
-        g.attach(self._btn_repo_browse, 2, 5, 1, 1)
+        g.attach(self._btn_repo_browse, 2, 6, 1, 1)
 
         self._btn_test = Gtk.Button(label="Test Connection")
         self._btn_test.connect("clicked", self._test_connection)
         self._btn_test.set_no_show_all(True)
-        g.attach(self._btn_test, 1, 6, 1, 1)
+        g.attach(self._btn_test, 1, 7, 1, 1)
 
         self._lbl_test = Gtk.Label(label="")
         self._lbl_test.set_no_show_all(True)
-        g.attach(self._lbl_test, 1, 7, 2, 1)
+        g.attach(self._lbl_test, 1, 8, 2, 1)
 
         self._combo_backend.connect("changed", self._on_backend_changed)
         self._on_backend_changed(self._combo_backend)
@@ -113,12 +134,95 @@ class SettingsDialog(Gtk.Dialog):
         return g
 
     def _on_backend_changed(self, _combo: Gtk.ComboBoxText) -> None:
-        is_sftp = self._combo_backend.get_active_text() == "sftp"
+        backend = self._combo_backend.get_active_text()
+        is_sftp = backend == "sftp"
+        is_local = backend == "local"
+        is_rclone = backend == "rclone"
         for w in (self._lbl_host, self._e_host, self._lbl_port, self._e_port,
                   self._lbl_user, self._e_user, self._lbl_key, self._e_key,
                   self._btn_key, self._btn_test, self._lbl_test):
             w.set_visible(is_sftp)
-        self._btn_repo_browse.set_visible(not is_sftp)
+        for w in (self._lbl_rclone_remote, self._combo_rclone_remote, self._btn_rclone_config):
+            w.set_visible(is_rclone)
+        if is_rclone and not self._rclone_remotes_loaded:
+            self._start_rclone_remotes_load()
+        self._lbl_repo.set_label("Path:" if is_rclone else "Repo Path:")
+        self._btn_repo_browse.set_visible(is_local)
+
+    def _start_rclone_remotes_load(self, current: str | None = None) -> None:
+        if self._rclone_remotes_loading:
+            return
+        self._rclone_remotes_loading = True
+        if current is None:
+            current = self._cfg.rclone_remote
+        threading.Thread(target=self._load_rclone_remotes_worker, args=(current,), daemon=True).start()
+
+    def _load_rclone_remotes_worker(self, current: str) -> None:
+        remotes = runner.list_rclone_remotes()
+        GLib.idle_add(self._set_rclone_remotes, remotes, current)
+
+    def _set_rclone_remotes(self, remotes: list[str], current: str) -> bool:
+        self._combo_rclone_remote.remove_all()
+        self._rclone_remotes_loaded = True
+        self._rclone_remotes_loading = False
+        current = current.strip().rstrip(":")
+        if current and current not in remotes:
+            remotes.insert(0, current)
+        for remote in remotes:
+            self._combo_rclone_remote.append_text(remote)
+        if current:
+            self._combo_rclone_remote.set_active(remotes.index(current))
+        elif remotes:
+            self._combo_rclone_remote.set_active(0)
+        return False
+
+    def _configure_rclone(self, _btn: Gtk.Button) -> None:
+        marker_fd, marker_name = tempfile.mkstemp(prefix="restic-box-rclone-config-")
+        os.close(marker_fd)
+        marker = Path(marker_name)
+        marker.unlink(missing_ok=True)
+        shell_cmd = f"rclone config; touch {shlex.quote(str(marker))}"
+        terminals = [
+            ["x-terminal-emulator", "-e", "sh", "-c", shell_cmd],
+            ["gnome-terminal", "--", "sh", "-c", shell_cmd],
+            ["kgx", "--", "sh", "-c", shell_cmd],
+            ["konsole", "-e", "sh", "-c", shell_cmd],
+            ["xfce4-terminal", "-e", f"sh -c {shlex.quote(shell_cmd)}"],
+            ["mate-terminal", "-e", f"sh -c {shlex.quote(shell_cmd)}"],
+            ["xterm", "-e", "sh", "-c", shell_cmd],
+        ]
+        for cmd in terminals:
+            if shutil.which(cmd[0]):
+                try:
+                    subprocess.Popen(cmd)
+                except OSError:
+                    continue
+                current = self._combo_rclone_remote.get_active_text() or ""
+                threading.Thread(
+                    target=self._refresh_rclone_remotes_after,
+                    args=(marker, current),
+                    daemon=True,
+                ).start()
+                return
+        marker.unlink(missing_ok=True)
+        self._show_error("No terminal emulator found for rclone config.")
+
+    def _refresh_rclone_remotes_after(self, marker: Path, current: str) -> None:
+        while not marker.exists():
+            time.sleep(0.5)
+        marker.unlink(missing_ok=True)
+        GLib.idle_add(self._start_rclone_remotes_load, current)
+
+    def _show_error(self, message: str) -> None:
+        dlg = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text=message,
+        )
+        dlg.run()
+        dlg.destroy()
 
     def _pick_path(
         self,
@@ -547,6 +651,9 @@ class SettingsDialog(Gtk.Dialog):
             port = int(self._e_port.get_text().strip())
         except ValueError:
             port = self._cfg.ssh_port
+        rclone_remote = self._combo_rclone_remote.get_active_text()
+        if rclone_remote is None:
+            rclone_remote = self._cfg.rclone_remote
 
         dirs = [
             cfg_mod.Directory(
@@ -564,6 +671,7 @@ class SettingsDialog(Gtk.Dialog):
             ssh_port=port,
             ssh_user=self._e_user.get_text().strip(),
             ssh_key=self._e_key.get_text().strip(),
+            rclone_remote=rclone_remote.strip().rstrip(":"),
             repo_path=self._e_repo.get_text().strip(),
             password_file=self._e_pwfile.get_text().strip(),
             compression=self._combo_comp.get_active_text() or "max",
@@ -583,5 +691,3 @@ class SettingsDialog(Gtk.Dialog):
             retention_hours=int(self._retention_spins["retention_hours"].get_value()),
             directories=dirs,
         )
-
-

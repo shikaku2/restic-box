@@ -56,7 +56,25 @@ def is_host_reachable(cfg: Config) -> bool:
 def repo_url(cfg: Config) -> str:
     if cfg.backend == "local":
         return cfg.repo_path
+    if cfg.backend == "rclone":
+        remote = cfg.rclone_remote.strip().rstrip(":")
+        return f"rclone:{remote}:{cfg.repo_path}"
     return f"sftp:{_SSH_ALIAS}:{cfg.repo_path}"
+
+
+def list_rclone_remotes() -> list[str]:
+    try:
+        result = subprocess.run(
+            ["rclone", "listremotes"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return [line.strip().rstrip(":") for line in result.stdout.splitlines() if line.strip()]
 
 
 def _base_cmd(cfg: Config) -> list[str]:

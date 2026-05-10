@@ -4,6 +4,7 @@
 # Build variants (set via env before running):
 #   BUNDLE_RESTIC=1   — download and embed the restic binary
 #   BUNDLE_RESTIC=0   — omit restic (user must have it on $PATH)
+#   BUNDLE_RCLONE=1   — download and embed the rclone binary
 #   VERSION=x.y.z     — sets the AppImage filename version
 #
 # Usage:
@@ -38,6 +39,18 @@ script:
       bunzip2 -f /tmp/restic.bz2
       mv /tmp/restic AppDir/usr/bin/restic
       chmod +x AppDir/usr/bin/restic
+    fi
+
+  # Bundle rclone binary when requested
+  - |
+    if [ "${BUNDLE_RCLONE:-0}" = "1" ]; then
+      echo "--- Bundling rclone binary ---"
+      mkdir -p AppDir/usr/bin
+      RCLONE_URL="${RCLONE_URL:-https://downloads.rclone.org/rclone-current-linux-amd64.zip}"
+      wget -q "$RCLONE_URL" -O /tmp/rclone.zip
+      python3 -c "import zipfile; z=zipfile.ZipFile('/tmp/rclone.zip'); n=next(p for p in z.namelist() if p.endswith('/rclone')); open('/tmp/rclone','wb').write(z.read(n))"
+      mv /tmp/rclone AppDir/usr/bin/rclone
+      chmod +x AppDir/usr/bin/rclone
     fi
 
 AppDir:

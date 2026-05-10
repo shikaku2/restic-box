@@ -20,11 +20,12 @@ class Directory:
 
 @dataclass
 class Config:
-    backend: str = "sftp"  # sftp | local
+    backend: str = "sftp"  # sftp | local | rclone
     ssh_host: str = ""
     ssh_port: int = 23
     ssh_user: str = ""
     ssh_key: str = str(Path.home() / ".ssh" / "id_ed25519")
+    rclone_remote: str = ""
     repo_path: str = "/backups/restic-repo"
     password_file: str = str(DEFAULT_PASSWORD_FILE)
     compression: str = "max"  # off | auto | max
