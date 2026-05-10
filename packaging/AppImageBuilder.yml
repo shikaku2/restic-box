@@ -5,6 +5,8 @@
 #   BUNDLE_RESTIC=1   — download and embed the restic binary
 #   BUNDLE_RESTIC=0   — omit restic (user must have it on $PATH)
 #   BUNDLE_RCLONE=1   — download and embed the rclone binary
+#   RESTIC_VERSION / RESTIC_SHA256 and RCLONE_VERSION / RCLONE_SHA256 can
+#                    override the pinned bundled tool versions.
 #   VERSION=x.y.z     — sets the AppImage filename version
 #
 # Usage:
@@ -33,9 +35,11 @@ script:
       echo "--- Bundling restic binary ---"
       mkdir -p AppDir/usr/bin
       RESTIC_VER="${RESTIC_VERSION:-0.17.3}"
+      RESTIC_SHA256="${RESTIC_SHA256:-5097faeda6aa13167aae6e36efdba636637f8741fed89bbf015678334632d4d3}"
       ARCH="amd64"
       URL="https://github.com/restic/restic/releases/download/v${RESTIC_VER}/restic_${RESTIC_VER}_linux_${ARCH}.bz2"
       wget -q "$URL" -O /tmp/restic.bz2
+      echo "${RESTIC_SHA256}  /tmp/restic.bz2" | sha256sum -c -
       bunzip2 -f /tmp/restic.bz2
       mv /tmp/restic AppDir/usr/bin/restic
       chmod +x AppDir/usr/bin/restic
@@ -46,8 +50,11 @@ script:
     if [ "${BUNDLE_RCLONE:-0}" = "1" ]; then
       echo "--- Bundling rclone binary ---"
       mkdir -p AppDir/usr/bin
-      RCLONE_URL="${RCLONE_URL:-https://downloads.rclone.org/rclone-current-linux-amd64.zip}"
+      RCLONE_VER="${RCLONE_VERSION:-1.74.0}"
+      RCLONE_SHA256="${RCLONE_SHA256:-61de0a78d8776fe3e080f8385ebe96d817f2ee6a6003fe36b2d9f3b49d3e36ea}"
+      RCLONE_URL="${RCLONE_URL:-https://downloads.rclone.org/v${RCLONE_VER}/rclone-v${RCLONE_VER}-linux-amd64.zip}"
       wget -q "$RCLONE_URL" -O /tmp/rclone.zip
+      echo "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c -
       python3 -c "import zipfile; z=zipfile.ZipFile('/tmp/rclone.zip'); n=next(p for p in z.namelist() if p.endswith('/rclone')); open('/tmp/rclone','wb').write(z.read(n))"
       mv /tmp/rclone AppDir/usr/bin/rclone
       chmod +x AppDir/usr/bin/rclone
