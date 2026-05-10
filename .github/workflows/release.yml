@@ -15,9 +15,14 @@ jobs:
       matrix:
         include:
           - bundle_restic: '0'
+            bundle_rclone: '0'
             bundle_suffix: ''
           - bundle_restic: '1'
+            bundle_rclone: '0'
             bundle_suffix: '-bundled'
+          - bundle_restic: '1'
+            bundle_rclone: '1'
+            bundle_suffix: '-bundled-rclone'
 
     steps:
       - uses: actions/checkout@v4
@@ -52,6 +57,7 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
           BUNDLE_RESTIC: ${{ matrix.bundle_restic }}
+          BUNDLE_RCLONE: ${{ matrix.bundle_rclone }}
           BUNDLE_SUFFIX: ${{ matrix.bundle_suffix }}
         run: appimage-builder --recipe AppImageBuilder.yml --skip-tests
 
