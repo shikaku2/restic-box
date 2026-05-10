@@ -593,10 +593,17 @@ class ResticIndicator:
         self._indicator.set_menu(menu)
 
     def _total_backup_size_label(self) -> str:
-        if self._cfg.total_backup_size > 0:
-            total_s = runner.fmt_bytes(int(self._cfg.total_backup_size))
-            return f"Total of everything backed up: {total_s}"
-        return "Total of everything backed up: --"
+        total_s = (
+            runner.fmt_bytes(int(self._cfg.total_backup_size))
+            if self._cfg.total_backup_size > 0
+            else "--"
+        )
+        compressed_s = (
+            runner.fmt_bytes(int(self._cfg.compressed_backup_size))
+            if self._cfg.compressed_backup_size > 0
+            else "--"
+        )
+        return f"Total/compressed backup size: {total_s}/{compressed_s}"
 
     def _update_idle_size_item(self) -> None:
         self._item_size.set_label(self._total_backup_size_label())
@@ -782,11 +789,17 @@ class ResticIndicator:
             else:
                 GLib.idle_add(self._set_state, BackupState.ERROR, f"Failed at {ts}")
                 self._log(f"=== Backup FAILED at {ts} ===")
+            compressed_backup_size = self._cfg.compressed_backup_size
+            if all_ok:
+                latest_compressed_size = runner.run_raw_data_size(self._cfg)
+                if latest_compressed_size is not None:
+                    compressed_backup_size = latest_compressed_size
             self._cfg = dataclasses.replace(
                 self._cfg,
                 last_backup_ts=time.time(),
                 last_backup_ok=all_ok,
-                total_backup_size=run_total_size if all_ok else self._cfg.total_backup_size
+                total_backup_size=run_total_size if all_ok else self._cfg.total_backup_size,
+                compressed_backup_size=compressed_backup_size,
             )
             cfg_mod.save_config(self._cfg)
             if all_ok:

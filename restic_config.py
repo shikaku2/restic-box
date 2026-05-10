@@ -43,6 +43,7 @@ class Config:
     last_backup_ok: bool = True
     last_check_ts: float = 0.0    # unix timestamp of last check attempt, 0 = never
     total_backup_size: float = 0.0  # total uncompressed bytes across enabled backup sources
+    compressed_backup_size: float = 0.0  # repository-wide compressed bytes, including older snapshots
     retention_enabled: bool = False
     retention_years: int = 0
     retention_months: int = 0

@@ -222,6 +222,26 @@ def run_snapshots_json(cfg: Config) -> list[dict]:
     return []
 
 
+def run_raw_data_size(cfg: Config) -> float | None:
+    """Return the compressed/deduplicated repository data size reported by restic stats."""
+    ensure_ssh_config(cfg)
+    rc, out = run_restic(["stats", "--mode", "raw-data", "--json"], cfg)
+    if rc not in (RC_OK, RC_PARTIAL):
+        return None
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            stats = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        size = stats.get("total_size")
+        if isinstance(size, (int, float)):
+            return float(size)
+    return None
+
+
 def run_ls_json(cfg: Config, snapshot_id: str) -> list[dict]:
     ensure_ssh_config(cfg)
     _, out = run_restic(["ls", "--json", snapshot_id], cfg)
