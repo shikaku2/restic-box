@@ -17,6 +17,12 @@ A GTK3 system-tray applet for [restic](https://restic.net/) backups to SSH stora
 
 ## Installation
 
+### AUR
+
+```bash
+yay -S restic-box
+```
+
 ### AppImage (recommended — no system Python deps needed)
 
 Download the latest release from the [Releases page](../../releases):
