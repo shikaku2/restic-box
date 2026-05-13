@@ -34,8 +34,8 @@ script:
     if [ "${BUNDLE_RESTIC:-0}" = "1" ]; then
       echo "--- Bundling restic binary ---"
       mkdir -p AppDir/usr/bin
-      RESTIC_VER="${RESTIC_VERSION:-0.17.3}"
-      RESTIC_SHA256="${RESTIC_SHA256:-5097faeda6aa13167aae6e36efdba636637f8741fed89bbf015678334632d4d3}"
+      RESTIC_VER="${RESTIC_VERSION:-0.18.1}"
+      RESTIC_SHA256="${RESTIC_SHA256:-680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d}"
       ARCH="amd64"
       URL="https://github.com/restic/restic/releases/download/v${RESTIC_VER}/restic_${RESTIC_VER}_linux_${ARCH}.bz2"
       wget -q "$URL" -O /tmp/restic.bz2
