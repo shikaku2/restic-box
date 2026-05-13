@@ -20,6 +20,8 @@ packaging/AppDir/
 packaging/*.AppImage
 packaging/appimage-builder-cache/
 packaging/restic
+packaging/.rclone-check-ts
+packaging/.restic-check-ts
 
 # Editor
 .idea/

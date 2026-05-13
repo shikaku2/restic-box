@@ -399,6 +399,8 @@ class SettingsDialog(Gtk.Dialog):
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         btn_add = Gtk.Button(label="Add Directory…")
         btn_add.connect("clicked", self._add_directory)
+        btn_add_file = Gtk.Button(label="Add File…")
+        btn_add_file.connect("clicked", self._add_file)
         btn_remove = Gtk.Button(label="Remove Selected")
         btn_remove.connect("clicked", self._remove_directory)
         self._btn_excl_file = Gtk.Button(label="Add Exclude File(s)…")
@@ -408,6 +410,7 @@ class SettingsDialog(Gtk.Dialog):
         self._btn_excl_folder.set_sensitive(False)
         self._btn_excl_folder.connect("clicked", self._add_exclude_folder)
         btn_row.pack_start(btn_add, False, False, 0)
+        btn_row.pack_start(btn_add_file, False, False, 0)
         btn_row.pack_start(btn_remove, False, False, 0)
         btn_row.pack_start(self._btn_excl_file, False, False, 0)
         btn_row.pack_start(self._btn_excl_folder, False, False, 0)
@@ -427,6 +430,20 @@ class SettingsDialog(Gtk.Dialog):
             title="Select directory to back up",
             parent=self,
             action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        dlg.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_OPEN, Gtk.ResponseType.OK,
+        )
+        if dlg.run() == Gtk.ResponseType.OK:
+            self._dir_store.append([True, dlg.get_filename(), ""])
+        dlg.destroy()
+
+    def _add_file(self, _btn: Gtk.Button) -> None:
+        dlg = Gtk.FileChooserDialog(
+            title="Select file to back up",
+            parent=self,
+            action=Gtk.FileChooserAction.OPEN,
         )
         dlg.add_buttons(
             Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,

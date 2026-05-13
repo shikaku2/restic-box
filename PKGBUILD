@@ -26,7 +26,7 @@ makedepends=(
   'python-setuptools'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Shikaku2/restic-box/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('60ef7e5c6af6ca33d9bdd084bca237f1e3633d4438fe2f60105328ca9b3de396')
+sha256sums=('90caa62310f218ccdb62742ab310cfba21f06d278c8aa44f5799e86e7466dfb2')
 
 build() {
   cd "$pkgname-$pkgver"

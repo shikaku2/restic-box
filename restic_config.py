@@ -16,6 +16,7 @@ class Directory:
     path: str
     excludes: list[str] = field(default_factory=list)
     enabled: bool = True
+    cached_size: float = 0.0  # bytes reported by restic on last completed backup of this dir
 
 
 @dataclass

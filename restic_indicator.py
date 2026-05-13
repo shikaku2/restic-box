@@ -511,6 +511,7 @@ class ResticIndicator:
         self._current_backup_done: float = 0.0
         self._backup_item_index: int = 0
         self._backup_item_count: int = 0
+        self._backup_dirs: list = []
         self._mount_proc: subprocess.Popen | None = None
         self._mount_spinner_id: int | None = None
         self._mount_frame: int = 0
@@ -611,12 +612,21 @@ class ResticIndicator:
     def _update_status_item(self) -> None:
         self._item_status.set_label(self._last_msg)
 
+    def _weighted_total_pct(self, current_pct: float) -> float:
+        dirs = self._backup_dirs
+        if not dirs:
+            return 0.0
+        total_weight = sum(d.cached_size for d in dirs)
+        i = self._backup_item_index
+        if total_weight == 0:
+            return (i + current_pct) / len(dirs)
+        done_weight = sum(d.cached_size for d in dirs[:i])
+        if i < len(dirs) and dirs[i].cached_size > 0:
+            done_weight += dirs[i].cached_size * current_pct
+        return done_weight / total_weight
+
     def _backup_progress_msg(self, pct: float, done: float, total: float) -> tuple[str, float]:
-        total_pct = (
-            self._backup_item_index / self._backup_item_count
-            if self._backup_item_count > 0
-            else 0.0
-        )
+        total_pct = self._weighted_total_pct(pct)
         done_s = runner.fmt_bytes(int(done))
         total_s = runner.fmt_bytes(int(total)) if total else "?"
         msg = f"Total: {total_pct*100:.0f}% Uploading: {pct*100:.0f}% ({done_s} / {total_s})"
@@ -749,6 +759,7 @@ class ResticIndicator:
             all_ok = True
             run_total_size = 0.0
             self._last_progress_ts = 0.0
+            self._backup_dirs = dirs
             self._backup_item_count = len(dirs)
             msg, total_pct = self._backup_progress_msg(0.0, 0.0, 0.0)
             GLib.idle_add(self._set_state, BackupState.RUNNING, msg, total_pct)
@@ -772,6 +783,8 @@ class ResticIndicator:
                     self._log(f"ERROR: backup of {d.path} failed (rc={rc})")
                 if rc in (runner.RC_OK, runner.RC_PARTIAL):
                     run_total_size += self._current_backup_total
+                    if self._current_backup_total > 0:
+                        d.cached_size = self._current_backup_total
                 if self._stop_requested.is_set():
                     self._log("Backup stopped by user — remaining directories skipped.")
                     GLib.idle_add(self._set_state, BackupState.IDLE, "Stopped")
@@ -807,6 +820,7 @@ class ResticIndicator:
         finally:
             self._backup_item_index = 0
             self._backup_item_count = 0
+            self._backup_dirs = []
             if inhibit_fd is not None:
                 _release_inhibit(inhibit_fd)
 
