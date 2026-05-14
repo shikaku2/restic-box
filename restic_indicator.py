@@ -1085,7 +1085,7 @@ class ResticIndicator:
     # --- settings ---
 
     def _open_settings(self) -> None:
-        dlg = SettingsDialog(None, self._cfg)
+        dlg = SettingsDialog(None, self._cfg, on_log=self._log)
         response = dlg.run()
         if response == Gtk.ResponseType.OK:
             self._cfg = dlg.collect()

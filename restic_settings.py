@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from typing import Callable
 import threading
 import time
 from pathlib import Path
@@ -25,13 +26,19 @@ import restic_runner as runner
 # Settings dialog
 # ---------------------------------------------------------------------------
 class SettingsDialog(Gtk.Dialog):
-    def __init__(self, parent: Gtk.Window | None, cfg: cfg_mod.Config) -> None:
+    def __init__(
+        self,
+        parent: Gtk.Window | None,
+        cfg: cfg_mod.Config,
+        on_log: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(title="restic-box Settings", transient_for=parent)
         self.set_default_size(520, 460)
         self.add_button("_Cancel", Gtk.ResponseType.CANCEL)
         self.add_button("_Save", Gtk.ResponseType.OK)
 
         self._cfg = cfg
+        self._on_log: Callable[[str], None] = on_log or (lambda msg: print(msg, flush=True))
         self._rclone_remotes_loaded = False
         self._rclone_remotes_loading = False
         notebook = Gtk.Notebook()
@@ -262,16 +269,28 @@ class SettingsDialog(Gtk.Dialog):
         self._pick_path(self._e_key, "Select SSH private key", Gtk.FileChooserAction.OPEN, str(Path.home() / ".ssh"))
 
     def _test_connection(self, _btn: Gtk.Button) -> None:
-        cfg = self.collect()
+        self._on_log("[test-connection] button clicked")
+        try:
+            cfg = self.collect()
+        except Exception as e:
+            self._on_log(f"[test-connection] collect() failed: {e}")
+            return
+        self._on_log(f"[test-connection] backend={cfg.backend}")
         self._lbl_test.set_text("Testing…")
         self._btn_test.set_sensitive(False)
+        self._on_log("[test-connection] starting thread")
         threading.Thread(target=self._do_test_connection, args=(cfg,), daemon=True).start()
 
     def _do_test_connection(self, cfg: cfg_mod.Config) -> None:
-        if cfg.backend == "rclone":
-            self._do_rclone_test_connection(cfg)
-            return
-        self._do_sftp_test_connection(cfg)
+        self._on_log("[test-connection] thread running")
+        try:
+            if cfg.backend == "rclone":
+                self._do_rclone_test_connection(cfg)
+            else:
+                self._do_sftp_test_connection(cfg)
+        except Exception as e:
+            self._on_log(f"[test-connection] unhandled exception: {e}")
+            GLib.idle_add(self._finish_test_connection, False)
 
     def _do_sftp_test_connection(self, cfg: cfg_mod.Config) -> None:
         ok = False
@@ -285,44 +304,48 @@ class SettingsDialog(Gtk.Dialog):
             f"{cfg.ssh_user}@{cfg.ssh_host}",
             "echo OK",
         ]
-        print(f"[test-connection] cmd: {' '.join(cmd)}", flush=True)
+        self._on_log(f"[test-connection] cmd: {' '.join(cmd)}")
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            print(f"[test-connection] rc={result.returncode}", flush=True)
+            self._on_log(f"[test-connection] rc={result.returncode}")
             if result.stdout:
-                print(f"[test-connection] stdout: {result.stdout.strip()}", flush=True)
+                self._on_log(f"[test-connection] stdout: {result.stdout.strip()}")
             if result.stderr:
-                print(f"[test-connection] stderr: {result.stderr.strip()}", flush=True)
-            # Hetzner storage boxes run a restricted shell: "echo OK" returns rc=8
-            # with "Command not found" — that still means auth succeeded.
+                self._on_log(f"[test-connection] stderr: {result.stderr.strip()}")
+            # SSH exits 255 on its own errors (unreachable, auth failure, bad key).
+            # Any other rc means SSH connected and authenticated; the remote may
+            # reject arbitrary commands (Hetzner storage boxes do this) and that's fine.
             auth_failed = any(s in result.stderr for s in ("Permission denied", "Authentication failed"))
-            ok = not auth_failed and (
-                (result.returncode == 0 and "OK" in result.stdout)
-                or "Command not found" in result.stderr
-            )
+            ok = not auth_failed and result.returncode != 255
+        except subprocess.TimeoutExpired:
+            self._on_log("[test-connection] timed out after 15s")
         except Exception as e:
-            print(f"[test-connection] exception: {e}", flush=True)
+            self._on_log(f"[test-connection] exception: {e}")
+        self._on_log(f"[test-connection] result: {'OK' if ok else 'FAILED'}")
         GLib.idle_add(self._finish_test_connection, ok)
 
     def _do_rclone_test_connection(self, cfg: cfg_mod.Config) -> None:
         ok = False
         remote = cfg.rclone_remote.strip().rstrip(":")
         if not remote:
-            print("[test-connection] rclone remote is empty", flush=True)
+            self._on_log("[test-connection] rclone remote is empty")
             GLib.idle_add(self._finish_test_connection, False)
             return
         cmd = ["rclone", "lsd", f"{remote}:"]
-        print(f"[test-connection] cmd: {' '.join(cmd)}", flush=True)
+        self._on_log(f"[test-connection] cmd: {' '.join(cmd)}")
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            print(f"[test-connection] rc={result.returncode}", flush=True)
+            self._on_log(f"[test-connection] rc={result.returncode}")
             if result.stdout:
-                print(f"[test-connection] stdout: {result.stdout.strip()}", flush=True)
+                self._on_log(f"[test-connection] stdout: {result.stdout.strip()}")
             if result.stderr:
-                print(f"[test-connection] stderr: {result.stderr.strip()}", flush=True)
+                self._on_log(f"[test-connection] stderr: {result.stderr.strip()}")
             ok = result.returncode == 0
+        except subprocess.TimeoutExpired:
+            self._on_log("[test-connection] timed out after 15s")
         except Exception as e:
-            print(f"[test-connection] exception: {e}", flush=True)
+            self._on_log(f"[test-connection] exception: {e}")
+        self._on_log(f"[test-connection] result: {'OK' if ok else 'FAILED'}")
         GLib.idle_add(self._finish_test_connection, ok)
 
     def _finish_test_connection(self, ok: bool) -> bool:
