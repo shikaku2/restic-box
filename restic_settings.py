@@ -140,8 +140,10 @@ class SettingsDialog(Gtk.Dialog):
         is_rclone = backend == "rclone"
         for w in (self._lbl_host, self._e_host, self._lbl_port, self._e_port,
                   self._lbl_user, self._e_user, self._lbl_key, self._e_key,
-                  self._btn_key, self._btn_test, self._lbl_test):
+                  self._btn_key):
             w.set_visible(is_sftp)
+        for w in (self._btn_test, self._lbl_test):
+            w.set_visible(is_sftp or is_rclone)
         for w in (self._lbl_rclone_remote, self._combo_rclone_remote, self._btn_rclone_config):
             w.set_visible(is_rclone)
         if is_rclone and not self._rclone_remotes_loaded:
@@ -160,11 +162,14 @@ class SettingsDialog(Gtk.Dialog):
     def _load_rclone_remotes_worker(self, current: str) -> None:
         remotes = runner.list_rclone_remotes()
         if remotes is None:
-            subprocess.Popen(
-                ["notify-send", "-a", "restic-box", "restic-box",
-                 "rclone is not installed — install it to use rclone backends"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            try:
+                subprocess.Popen(
+                    ["notify-send", "-a", "restic-box", "restic-box",
+                     "rclone is not installed — install it to use rclone backends"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
             remotes = []
         GLib.idle_add(self._set_rclone_remotes, remotes, current)
 
@@ -257,16 +262,25 @@ class SettingsDialog(Gtk.Dialog):
         self._pick_path(self._e_key, "Select SSH private key", Gtk.FileChooserAction.OPEN, str(Path.home() / ".ssh"))
 
     def _test_connection(self, _btn: Gtk.Button) -> None:
-        self._lbl_test.set_text("Testing…")
-        threading.Thread(target=self._do_test_connection, daemon=True).start()
-
-    def _do_test_connection(self) -> None:
         cfg = self.collect()
+        self._lbl_test.set_text("Testing…")
+        self._btn_test.set_sensitive(False)
+        threading.Thread(target=self._do_test_connection, args=(cfg,), daemon=True).start()
+
+    def _do_test_connection(self, cfg: cfg_mod.Config) -> None:
+        if cfg.backend == "rclone":
+            self._do_rclone_test_connection(cfg)
+            return
+        self._do_sftp_test_connection(cfg)
+
+    def _do_sftp_test_connection(self, cfg: cfg_mod.Config) -> None:
+        ok = False
         cmd = [
             "ssh",
             "-p", str(cfg.ssh_port),
             "-i", str(Path(cfg.ssh_key).expanduser()),
             "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=10",
             f"{cfg.ssh_user}@{cfg.ssh_host}",
             "echo OK",
@@ -288,8 +302,33 @@ class SettingsDialog(Gtk.Dialog):
             )
         except Exception as e:
             print(f"[test-connection] exception: {e}", flush=True)
-            ok = False
-        GLib.idle_add(self._lbl_test.set_text, "Connection OK" if ok else "Connection FAILED")
+        GLib.idle_add(self._finish_test_connection, ok)
+
+    def _do_rclone_test_connection(self, cfg: cfg_mod.Config) -> None:
+        ok = False
+        remote = cfg.rclone_remote.strip().rstrip(":")
+        if not remote:
+            print("[test-connection] rclone remote is empty", flush=True)
+            GLib.idle_add(self._finish_test_connection, False)
+            return
+        cmd = ["rclone", "lsd", f"{remote}:"]
+        print(f"[test-connection] cmd: {' '.join(cmd)}", flush=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            print(f"[test-connection] rc={result.returncode}", flush=True)
+            if result.stdout:
+                print(f"[test-connection] stdout: {result.stdout.strip()}", flush=True)
+            if result.stderr:
+                print(f"[test-connection] stderr: {result.stderr.strip()}", flush=True)
+            ok = result.returncode == 0
+        except Exception as e:
+            print(f"[test-connection] exception: {e}", flush=True)
+        GLib.idle_add(self._finish_test_connection, ok)
+
+    def _finish_test_connection(self, ok: bool) -> bool:
+        self._lbl_test.set_text("Connection OK" if ok else "Connection FAILED")
+        self._btn_test.set_sensitive(True)
+        return False
 
     # --- security tab ---
 
