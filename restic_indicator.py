@@ -651,6 +651,8 @@ class ResticIndicator:
 
     def _on_progress(self, pct: float, done: int, total: int) -> None:
         """Called from backup thread with JSON progress data — throttled to ~1 Hz."""
+        if self._stop_requested.is_set():
+            return
         self._current_backup_done = float(done)
         self._current_backup_total = float(total)
 
