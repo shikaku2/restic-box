@@ -749,7 +749,7 @@ class ResticIndicator:
     def _run_backup(self, automatic: bool = False) -> None:
         if self._skip_if_mounted("backup", automatic):
             return
-        inhibit_fd = _inhibit_sleep()
+        inhibit_fd = _inhibit_sleep() if self._cfg.inhibit_sleep else None
         try:
             dirs = [d for d in self._cfg.directories if d.enabled]
             if not dirs:
@@ -834,30 +834,35 @@ class ResticIndicator:
     def _run_check(self, automatic: bool = False) -> None:
         if self._skip_if_mounted("check", automatic):
             return
-        GLib.idle_add(self._set_state, BackupState.CHECKING, "Checking repo…")
-        if (self._cfg.check_read_data_subset
-                and self._cfg.check_subset_current > self._cfg.check_subset_total):
-            self._cfg = dataclasses.replace(self._cfg, check_subset_current=1)
-            cfg_mod.save_config(self._cfg)
-            self._log("Subset index reset to 1 (total was reduced).")
-        subset_info = ""
-        if self._cfg.check_read_data_subset:
-            n, t = self._cfg.check_subset_current, self._cfg.check_subset_total
-            subset_info = f" (subset {n}/{t})"
-        self._log(f"=== restic check started{subset_info} ===")
-        rc, _out = runner.run_check(self._cfg, on_output=self._log, on_proc=self._set_current_proc)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        if rc in (runner.RC_OK, runner.RC_PARTIAL):
-            GLib.idle_add(self._set_state, BackupState.SUCCESS, f"Check OK at {ts}{subset_info}")
+        inhibit_fd = _inhibit_sleep() if self._cfg.inhibit_sleep else None
+        try:
+            GLib.idle_add(self._set_state, BackupState.CHECKING, "Checking repo…")
+            if (self._cfg.check_read_data_subset
+                    and self._cfg.check_subset_current > self._cfg.check_subset_total):
+                self._cfg = dataclasses.replace(self._cfg, check_subset_current=1)
+                cfg_mod.save_config(self._cfg)
+                self._log("Subset index reset to 1 (total was reduced).")
+            subset_info = ""
             if self._cfg.check_read_data_subset:
-                n = self._cfg.check_subset_current % self._cfg.check_subset_total + 1
+                n, t = self._cfg.check_subset_current, self._cfg.check_subset_total
+                subset_info = f" (subset {n}/{t})"
+            self._log(f"=== restic check started{subset_info} ===")
+            rc, _out = runner.run_check(self._cfg, on_output=self._log, on_proc=self._set_current_proc)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            if rc in (runner.RC_OK, runner.RC_PARTIAL):
+                GLib.idle_add(self._set_state, BackupState.SUCCESS, f"Check OK at {ts}{subset_info}")
+                if self._cfg.check_read_data_subset:
+                    n = self._cfg.check_subset_current % self._cfg.check_subset_total + 1
+                else:
+                    n = self._cfg.check_subset_current
+                self._cfg = dataclasses.replace(self._cfg, check_subset_current=n, last_check_ts=time.time())
+                cfg_mod.save_config(self._cfg)
             else:
-                n = self._cfg.check_subset_current
-            self._cfg = dataclasses.replace(self._cfg, check_subset_current=n, last_check_ts=time.time())
-            cfg_mod.save_config(self._cfg)
-        else:
-            GLib.idle_add(self._set_state, BackupState.ERROR, f"Check FAILED at {ts}")
-        self._log(f"=== restic check finished (rc={rc}) at {ts} ===")
+                GLib.idle_add(self._set_state, BackupState.ERROR, f"Check FAILED at {ts}")
+            self._log(f"=== restic check finished (rc={rc}) at {ts} ===")
+        finally:
+            if inhibit_fd is not None:
+                _release_inhibit(inhibit_fd)
 
     def _trigger_full_check(self, automatic: bool = False) -> None:
         self._enqueue("check_full", automatic)
@@ -865,17 +870,22 @@ class ResticIndicator:
     def _run_full_check(self, automatic: bool = False) -> None:
         if self._skip_if_mounted("full check", automatic):
             return
-        GLib.idle_add(self._set_state, BackupState.CHECKING, "Checking repo (all data)…")
-        self._log("=== restic check --read-data started ===")
-        rc, _out = runner.run_check_full(self._cfg, on_output=self._log, on_proc=self._set_current_proc)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        if rc in (runner.RC_OK, runner.RC_PARTIAL):
-            GLib.idle_add(self._set_state, BackupState.SUCCESS, f"Full check OK at {ts}")
-            self._cfg = dataclasses.replace(self._cfg, check_subset_current=1)
-            cfg_mod.save_config(self._cfg)
-        else:
-            GLib.idle_add(self._set_state, BackupState.ERROR, f"Full check FAILED at {ts}")
-        self._log(f"=== restic check --read-data finished (rc={rc}) at {ts} ===")
+        inhibit_fd = _inhibit_sleep() if self._cfg.inhibit_sleep else None
+        try:
+            GLib.idle_add(self._set_state, BackupState.CHECKING, "Checking repo (all data)…")
+            self._log("=== restic check --read-data started ===")
+            rc, _out = runner.run_check_full(self._cfg, on_output=self._log, on_proc=self._set_current_proc)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            if rc in (runner.RC_OK, runner.RC_PARTIAL):
+                GLib.idle_add(self._set_state, BackupState.SUCCESS, f"Full check OK at {ts}")
+                self._cfg = dataclasses.replace(self._cfg, check_subset_current=1)
+                cfg_mod.save_config(self._cfg)
+            else:
+                GLib.idle_add(self._set_state, BackupState.ERROR, f"Full check FAILED at {ts}")
+            self._log(f"=== restic check --read-data finished (rc={rc}) at {ts} ===")
+        finally:
+            if inhibit_fd is not None:
+                _release_inhibit(inhibit_fd)
 
     # --- unlock / stop all ---
 

@@ -584,28 +584,32 @@ class SettingsDialog(Gtk.Dialog):
         self._chk_startup.set_active(cfg.backup_on_startup)
         g.attach(self._chk_startup, 1, 1, 1, 1)
 
-        g.attach(Gtk.Label(label="Auto-backup:", xalign=1.0), 0, 2, 1, 1)
+        self._chk_inhibit = Gtk.CheckButton(label="Inhibit sleep during backup/check")
+        self._chk_inhibit.set_active(cfg.inhibit_sleep)
+        g.attach(self._chk_inhibit, 1, 2, 1, 1)
+
+        g.attach(Gtk.Label(label="Auto-backup:", xalign=1.0), 0, 3, 1, 1)
         self._combo_bsched = Gtk.ComboBoxText()
         for opt in ("disabled", "interval", "daily"):
             self._combo_bsched.append_text(opt)
         self._combo_bsched.set_active(["disabled", "interval", "daily"].index(cfg.backup_schedule))
-        g.attach(self._combo_bsched, 1, 2, 1, 1)
+        g.attach(self._combo_bsched, 1, 3, 1, 1)
 
         self._lbl_binterval = Gtk.Label(label="Interval (h):", xalign=1.0)
         self._lbl_binterval.set_no_show_all(True)
-        g.attach(self._lbl_binterval, 0, 3, 1, 1)
+        g.attach(self._lbl_binterval, 0, 4, 1, 1)
         self._spin_binterval = Gtk.SpinButton.new_with_range(1, 168, 1)
         self._spin_binterval.set_value(cfg.backup_interval_hours)
         self._spin_binterval.set_no_show_all(True)
-        g.attach(self._spin_binterval, 1, 3, 1, 1)
+        g.attach(self._spin_binterval, 1, 4, 1, 1)
 
         self._lbl_bdailyhour = Gtk.Label(label="Run at hour:", xalign=1.0)
         self._lbl_bdailyhour.set_no_show_all(True)
-        g.attach(self._lbl_bdailyhour, 0, 4, 1, 1)
+        g.attach(self._lbl_bdailyhour, 0, 5, 1, 1)
         self._spin_bdailyhour = Gtk.SpinButton.new_with_range(0, 23, 1)
         self._spin_bdailyhour.set_value(cfg.backup_daily_hour)
         self._spin_bdailyhour.set_no_show_all(True)
-        g.attach(self._spin_bdailyhour, 1, 4, 1, 1)
+        g.attach(self._spin_bdailyhour, 1, 5, 1, 1)
 
         def _on_bsched_changed(_combo: Gtk.ComboBoxText) -> None:
             sel = self._combo_bsched.get_active_text()
@@ -762,6 +766,7 @@ class SettingsDialog(Gtk.Dialog):
             password_file=self._e_pwfile.get_text().strip(),
             compression=self._combo_comp.get_active_text() or "max",
             backup_on_startup=self._chk_startup.get_active(),
+            inhibit_sleep=self._chk_inhibit.get_active(),
             backup_schedule=self._combo_bsched.get_active_text() or "disabled",
             backup_interval_hours=int(self._spin_binterval.get_value()),
             backup_daily_hour=int(self._spin_bdailyhour.get_value()),
