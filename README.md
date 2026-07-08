@@ -97,6 +97,10 @@ On first run, open **Settings** from the tray menu to configure:
 
 Configuration is saved to `~/.config/restic-box/config.json`.
 
+### Note on shared repositories
+
+restic's `backup` command only takes a non-exclusive lock, so it does not prevent two separate machines from backing up to the same repository at the same time — this is expected restic behavior (concurrent backups are safe by design), but it means restic-box has no way to stop you from accidentally pointing two computers at the same repo/path. If you intend a repository to be used by a single machine, make sure only that machine is configured to back up to it.
+
 ## Vendor extensions
 
 You can drop pure-Python packages into `~/.local/share/restic-box/vendor/` and they will be loaded automatically at startup. This works whether you're running from source or an AppImage.
