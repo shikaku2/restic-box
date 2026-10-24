@@ -562,10 +562,6 @@ class ResticIndicator:
         item_unlock.connect("activate", lambda _: self._stop_and_unlock())
         menu.append(item_unlock)
 
-        item_rescan = Gtk.MenuItem(label="Rescan Split Plan (next backup)")
-        item_rescan.connect("activate", lambda _: self._rescan_split_plan())
-        menu.append(item_rescan)
-
         item_log = Gtk.MenuItem(label="Show Log…")
         item_log.connect("activate", lambda _: self._show_log())
         menu.append(item_log)
@@ -735,12 +731,6 @@ class ResticIndicator:
             finally:
                 with self._queue_lock:
                     self._queued.discard(op)
-
-    def _rescan_split_plan(self) -> None:
-        split.clear_cache()
-        self._log("Split plan cleared — sizes will be rescanned on the next backup. "
-                  "Units whose boundaries move lose their parent snapshot (full re-read, no re-upload).")
-        _notify("Split plan cleared; it will be rescanned on the next backup.")
 
     def _trigger_backup(self, automatic: bool = False) -> None:
         self._enqueue("backup", automatic)

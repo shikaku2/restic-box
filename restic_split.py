@@ -15,10 +15,6 @@ Rules (T = threshold):
     the big children/files excluded. Coverage is guaranteed by restic's own
     excludes, not by the scan, so a stale plan can never drop files.
 
-The plan is cached on disk. Sizes drift; a plan recomputed every run would
-change path sets and throw away parent snapshots. Rescan only on request or when
-the threshold/excludes change.
-
 Sizes are allocated bytes (st_blocks * 512, like `du`), so sparse images count
 for what they actually hold.
 """
@@ -26,16 +22,13 @@ for what they actually hold.
 from __future__ import annotations
 
 import fnmatch
-import json
 import os
 import re
 import stat
 import time
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-PLAN_FILE = Path.home() / ".config" / "restic-box" / "split-plan.json"
 GIB = 1024 ** 3
 
 LogFn = Optional[Callable[[str], None]]
@@ -226,7 +219,10 @@ def expand(directory, threshold_gib: int, log: LogFn = None) -> list:
     cached_size bookkeeping) is identical to before for anything under T.
     """
     try:
-        plan = plan_for(directory.path, directory.excludes, threshold_gib, log)
+        if threshold_gib <= 0:
+            plan = [Unit(directory.path, list(directory.excludes), 0.0, "dir")]
+        else:
+            plan = build_plan(directory.path, directory.excludes, threshold_gib * GIB, log)
     except Exception as exc:  # never let sizing break a backup
         if log:
             log(f"Split planning failed for {directory.path} ({exc}); backing up whole.")
@@ -234,47 +230,3 @@ def expand(directory, threshold_gib: int, log: LogFn = None) -> list:
     if len(plan) == 1 and plan[0].kind == "dir" and not plan[0].paths:
         return [directory]
     return [Target(u.path, u.excludes, u.size, u.paths or None, directory) for u in plan]
-
-
-# --- cache -----------------------------------------------------------------
-
-def _load_cache() -> dict:
-    try:
-        return json.loads(PLAN_FILE.read_text())
-    except Exception:
-        return {}
-
-
-def _save_cache(cache: dict) -> None:
-    PLAN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = PLAN_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cache, indent=2))
-    tmp.replace(PLAN_FILE)
-
-
-def plan_for(root: str, excludes: list[str], threshold_gib: int, log: LogFn = None) -> list[Unit]:
-    """Cached plan for one configured source. threshold_gib <= 0 disables splitting."""
-    root = os.path.normpath(root)
-    if threshold_gib <= 0:
-        return [Unit(root, list(excludes), 0.0, "dir")]
-    cache = _load_cache()
-    entry = cache.get(root)
-    if (entry and entry.get("threshold_gib") == threshold_gib
-            and entry.get("excludes") == list(excludes)):
-        return [Unit(**u) for u in entry["units"]]
-    units = build_plan(root, excludes, threshold_gib * GIB, log)
-    cache[root] = {
-        "threshold_gib": threshold_gib,
-        "excludes": list(excludes),
-        "scanned": time.time(),
-        "units": [asdict(u) for u in units],
-    }
-    _save_cache(cache)
-    return units
-
-
-def clear_cache() -> None:
-    try:
-        PLAN_FILE.unlink()
-    except FileNotFoundError:
-        pass

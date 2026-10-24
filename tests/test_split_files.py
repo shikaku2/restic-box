@@ -80,5 +80,110 @@ class SplitFilesTest(unittest.TestCase):
         self.assertEqual(seen, expected)
 
 
+class DisabledModeTest(unittest.TestCase):
+    """Ensure threshold=0 is a no-op and returns the original directory."""
+
+    def test_threshold_zero_returns_original_dir(self):
+        tmp = tempfile.mkdtemp(prefix="rb-split-zero-")
+        try:
+            root = os.path.join(tmp, "data")
+            _write(root, 50 * MIB)
+            units = split.expand(_make_dir(root), 0)
+            self.assertEqual(len(units), 1)
+            self.assertIs(units[0].path, root)
+            # Should NOT be a Target — original dir passes through unchanged
+            self.assertNotIsInstance(units[0], split.Target)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_threshold_negative_returns_original_dir(self):
+        tmp = tempfile.mkdtemp(prefix="rb-split-neg-")
+        try:
+            root = os.path.join(tmp, "data")
+            _write(root, 50 * MIB)
+            units = split.expand(_make_dir(root), -5)
+            self.assertEqual(len(units), 1)
+            self.assertNotIsInstance(units[0], split.Target)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class CacheTest(unittest.TestCase):
+    """Verify split plans are freshly computed each time."""
+
+    def test_different_threshold_different_plan(self):
+        tmp = tempfile.mkdtemp(prefix="rb-split-cache-")
+        try:
+            root = os.path.join(tmp, "tree")
+            os.makedirs(root)
+            # Create 3 subdirs, each 400MB = 1.2GB total
+            # threshold 1GiB -> will split (root >= 1GB, big dirs carved out)
+            for i in range(3):
+                _write(os.path.join(root, f"dir{i}", "data.bin"), 400 * MIB)
+            units1 = split.build_plan(root, [], 1 * split.GIB)
+            self.assertGreater(len(units1), 1, "Should split with 1GiB threshold")
+            units2 = split.build_plan(root, [], 2 * split.GIB)
+            self.assertNotEqual(len(units1), len(units2),
+                                "Different threshold should produce different unit count")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class HardlinkTest(unittest.TestCase):
+    """Verify hard links are counted only once."""
+
+    def test_hardlink_size_counted_once(self):
+        tmp = tempfile.mkdtemp(prefix="rb-split-hlink-")
+        try:
+            root = os.path.join(tmp, "data")
+            os.makedirs(root)
+            src = os.path.join(root, "original.bin")
+            _write(src, 20 * MIB)
+            # Hard link
+            os.link(src, os.path.join(root, "link.bin"))
+            # Scan should count 20MB total, not 40MB
+            size, children, bigfiles = split.scan(root, [], 10 * MIB)
+            self.assertEqual(size[root], 20 * MIB, "Hard links should be deduplicated")
+            # Only one unit (the original file), not two
+            units = split.build_plan(root, [], 5 * MIB)
+            file_units = [u for u in units if u.kind == "file"]
+            self.assertEqual(len(file_units), 1, "Hard links produce one unit")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class EdgeCaseTest(unittest.TestCase):
+    """Edge cases for plan_from_scan."""
+
+    def test_nonexistent_root_returns_single_unit(self):
+        units = split.build_plan("/definitely/does/not/exist/path", [], 100 * split.GIB)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0].kind, "dir")
+        self.assertEqual(units[0].size, 0.0)
+
+    def test_empty_directory(self):
+        tmp = tempfile.mkdtemp(prefix="rb-split-empty-")
+        try:
+            root = os.path.join(tmp, "empty")
+            os.makedirs(root)
+            units = split.build_plan(root, [], 10 * MIB)
+            self.assertEqual(len(units), 1)
+            self.assertEqual(units[0].kind, "dir")
+            self.assertEqual(units[0].size, 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _make_dir(path):
+    """Helper to create a minimal Directory-like object."""
+    class Dir:
+        def __init__(self, p):
+            self.path = p
+            self.excludes = []
+            self.cached_size = 0.0
+            self.enabled = True
+    return Dir(path)
+
+
 if __name__ == "__main__":
     unittest.main()

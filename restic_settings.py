@@ -642,10 +642,16 @@ class SettingsDialog(Gtk.Dialog):
         self._spin_split = Gtk.SpinButton.new_with_range(0, 100000, 10)
         self._spin_split.set_value(cfg.split_threshold_gib)
         self._spin_split.set_tooltip_text(
-            "Sources at or above this size are split into separate snapshots so an "
-            "interrupted run only re-reads one piece. 0 = off. Takes effect on a "
-            "cleared/new plan (tray: Rescan Split Plan).")
+            "0 = off. Split plans are freshly computed on each backup run.")
         g.attach(self._spin_split, 1, 11, 1, 1)
+        self._lbl_split_note = Gtk.Label(
+            "<i>Large sources are split into independent snapshots — interrupted "
+            "uploads only re-read one piece. Existing backups are used as parents "
+            "for deduplication.</i>",
+            use_markup=True, wrap=True, xalign=0.0, wrap_width=400,
+        )
+        self._lbl_split_note.set_no_show_all(False)
+        g.attach(self._lbl_split_note, 1, 12, 2, 1)
 
         g.attach(Gtk.Label(label="Check hour:", xalign=1.0), 0, 7, 1, 1)
         self._spin_hour = Gtk.SpinButton.new_with_range(0, 23, 1)
