@@ -50,8 +50,8 @@ script:
     if [ "${BUNDLE_RCLONE:-0}" = "1" ]; then
       echo "--- Bundling rclone binary ---"
       mkdir -p AppDir/usr/bin
-      RCLONE_VER="${RCLONE_VERSION:-1.74.4}"
-      RCLONE_SHA256="${RCLONE_SHA256:-fe435e0c36228e7c2f116a8701f01127bb1f694005fc11d1f27186c8bca4115d}"
+      RCLONE_VER="${RCLONE_VERSION:-1.75.2}"
+      RCLONE_SHA256="${RCLONE_SHA256:-349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702}"
       RCLONE_URL="${RCLONE_URL:-https://downloads.rclone.org/v${RCLONE_VER}/rclone-v${RCLONE_VER}-linux-amd64.zip}"
       wget -q "$RCLONE_URL" -O /tmp/rclone.zip
       echo "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c -
