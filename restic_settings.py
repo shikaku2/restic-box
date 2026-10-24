@@ -648,8 +648,7 @@ class SettingsDialog(Gtk.Dialog):
             "<i>Large sources are split into independent snapshots — interrupted "
             "uploads only re-read one piece. Existing backups are used as parents "
             "for deduplication.</i>",
-            use_markup=True, wrap=True, xalign=0.0, wrap_width=400,
-        )
+            use_markup=True, wrap=True, xalign=0.0)
         self._lbl_split_note.set_no_show_all(False)
         g.attach(self._lbl_split_note, 1, 12, 2, 1)
 
