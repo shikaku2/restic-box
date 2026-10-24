@@ -638,6 +638,15 @@ class SettingsDialog(Gtk.Dialog):
         self._combo_day.set_no_show_all(True)
         g.attach(self._combo_day, 1, 6, 1, 1)
 
+        g.attach(Gtk.Label(label="Auto-split (GiB):", xalign=1.0), 0, 11, 1, 1)
+        self._spin_split = Gtk.SpinButton.new_with_range(0, 100000, 10)
+        self._spin_split.set_value(cfg.split_threshold_gib)
+        self._spin_split.set_tooltip_text(
+            "Sources at or above this size are split into separate snapshots so an "
+            "interrupted run only re-reads one piece. 0 = off. Takes effect on a "
+            "cleared/new plan (tray: Rescan Split Plan).")
+        g.attach(self._spin_split, 1, 11, 1, 1)
+
         g.attach(Gtk.Label(label="Check hour:", xalign=1.0), 0, 7, 1, 1)
         self._spin_hour = Gtk.SpinButton.new_with_range(0, 23, 1)
         self._spin_hour.set_value(cfg.check_hour)
@@ -767,6 +776,7 @@ class SettingsDialog(Gtk.Dialog):
             compression=self._combo_comp.get_active_text() or "max",
             backup_on_startup=self._chk_startup.get_active(),
             inhibit_sleep=self._chk_inhibit.get_active(),
+            split_threshold_gib=int(self._spin_split.get_value()),
             backup_schedule=self._combo_bsched.get_active_text() or "disabled",
             backup_interval_hours=int(self._spin_binterval.get_value()),
             backup_daily_hour=int(self._spin_bdailyhour.get_value()),

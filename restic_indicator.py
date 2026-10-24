@@ -28,6 +28,7 @@ from gi.repository import AppIndicator3, GLib, Gio, Gtk  # type: ignore[attr-def
 
 import restic_config as cfg_mod
 import restic_runner as runner
+import restic_split as split
 from restic_settings import SettingsDialog
 from restic_status import LogWindow
 
@@ -561,6 +562,10 @@ class ResticIndicator:
         item_unlock.connect("activate", lambda _: self._stop_and_unlock())
         menu.append(item_unlock)
 
+        item_rescan = Gtk.MenuItem(label="Rescan Split Plan (next backup)")
+        item_rescan.connect("activate", lambda _: self._rescan_split_plan())
+        menu.append(item_rescan)
+
         item_log = Gtk.MenuItem(label="Show Log…")
         item_log.connect("activate", lambda _: self._show_log())
         menu.append(item_log)
@@ -731,6 +736,12 @@ class ResticIndicator:
                 with self._queue_lock:
                     self._queued.discard(op)
 
+    def _rescan_split_plan(self) -> None:
+        split.clear_cache()
+        self._log("Split plan cleared — sizes will be rescanned on the next backup. "
+                  "Units whose boundaries move lose their parent snapshot (full re-read, no re-upload).")
+        _notify("Split plan cleared; it will be rescanned on the next backup.")
+
     def _trigger_backup(self, automatic: bool = False) -> None:
         self._enqueue("backup", automatic)
 
@@ -758,6 +769,13 @@ class ResticIndicator:
                 return
 
             self._log("=== Backup started ===")
+            if self._cfg.split_threshold_gib > 0:
+                GLib.idle_add(self._set_state, BackupState.RUNNING, "Planning split…")
+            units: list = []
+            for d in dirs:
+                units += split.expand(d, self._cfg.split_threshold_gib, self._log)
+            dirs = units
+            unit_totals: dict[int, float] = {}
             all_ok = True
             run_total_size = 0.0
             self._last_progress_ts = 0.0
@@ -767,7 +785,7 @@ class ResticIndicator:
             GLib.idle_add(self._set_state, BackupState.RUNNING, msg, total_pct)
             for index, d in enumerate(dirs):
                 self._backup_item_index = index
-                self._log(f"Backing up: {d.path}")
+                self._log(f"Backing up [{index + 1}/{len(dirs)}]: " + " + ".join(runner.targets_of(d)))
                 self._current_backup_done = 0.0
                 self._current_backup_total = 0.0
                 msg, total_pct = self._backup_progress_msg(0.0, 0.0, 0.0)
@@ -787,10 +805,20 @@ class ResticIndicator:
                     run_total_size += self._current_backup_total
                     if self._current_backup_total > 0:
                         d.cached_size = self._current_backup_total
+                        unit_totals[id(d)] = self._current_backup_total
                 if self._stop_requested.is_set():
                     self._log("Backup stopped by user — remaining directories skipped.")
                     GLib.idle_add(self._set_state, BackupState.IDLE, "Stopped")
                     return
+
+            # roll split-unit sizes back up to the configured source they came from
+            by_origin: dict[int, tuple] = {}
+            for t in dirs:
+                if isinstance(t, split.Target):
+                    by_origin.setdefault(id(t.origin), (t.origin, []))[1].append(t)
+            for origin, ts_units in by_origin.values():
+                if all(id(t) in unit_totals for t in ts_units):
+                    origin.cached_size = sum(unit_totals[id(t)] for t in ts_units)
 
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
             if all_ok:

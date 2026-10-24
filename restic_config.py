@@ -46,6 +46,7 @@ class Config:
     total_backup_size: float = 0.0  # total uncompressed bytes across enabled backup sources
     compressed_backup_size: float = 0.0  # repository-wide compressed bytes, including older snapshots
     inhibit_sleep: bool = True
+    split_threshold_gib: int = 100  # split sources >= this (allocated GiB) into independent snapshots; 0 = off
     retention_enabled: bool = False
     retention_years: int = 0
     retention_months: int = 0

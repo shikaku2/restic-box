@@ -5,8 +5,10 @@ RC_OK = 0
 RC_PARTIAL = 3  # some source files unreadable — backup still created
 
 import json
+import os
 import socket
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -123,6 +125,11 @@ def init_repo(cfg: Config, on_output: OutputCallback = None) -> tuple[int, str]:
     return run_restic(["init"], cfg, on_output)
 
 
+def targets_of(directory) -> list[str]:
+    """Backup targets for a Directory or a split unit (units may carry several paths)."""
+    return list(getattr(directory, "paths", None) or [directory.path])
+
+
 def run_backup(
     cfg: Config,
     directory: Directory,
@@ -132,49 +139,64 @@ def run_backup(
 ) -> tuple[int, str]:
     """Run restic backup with --json output for progress streaming."""
     ensure_ssh_config(cfg)
-    args = ["backup", directory.path, f"--compression={cfg.compression}", "--json"]
-    for exc in directory.excludes:
-        args += ["--exclude", exc]
+    args = ["backup", *targets_of(directory), f"--compression={cfg.compression}", "--json"]
+    excl_file: str | None = None
+    if len(directory.excludes) > 200:
+        # split "rest" units can carry thousands of excludes; keep argv small
+        fd, excl_file = tempfile.mkstemp(prefix="restic-box-excl-", suffix=".txt")
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(directory.excludes) + "\n")
+        args += ["--exclude-file", excl_file]
+    else:
+        for exc in directory.excludes:
+            args += ["--exclude", exc]
 
-    proc = subprocess.Popen(
-        _base_cmd(cfg) + args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    if on_proc:
-        on_proc(proc)
-    lines: list[str] = []
-    assert proc.stdout is not None
+    try:
+        proc = subprocess.Popen(
+            _base_cmd(cfg) + args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if on_proc:
+            on_proc(proc)
+        lines: list[str] = []
+        assert proc.stdout is not None
 
-    for raw in proc.stdout:
-        raw = raw.rstrip()
-        lines.append(raw)
-        try:
-            msg = json.loads(raw)
-            mtype = msg.get("message_type", "")
-            if mtype == "status":
-                if on_progress:
-                    on_progress(
-                        float(msg.get("percent_done", 0.0)),
-                        int(msg.get("bytes_done", 0)),
-                        int(msg.get("total_bytes", 0)),
-                    )
-                # progress is shown in the tray — skip logging status lines
-            elif mtype == "summary":
+        for raw in proc.stdout:
+            raw = raw.rstrip()
+            lines.append(raw)
+            try:
+                msg = json.loads(raw)
+                mtype = msg.get("message_type", "")
+                if mtype == "status":
+                    if on_progress:
+                        on_progress(
+                            float(msg.get("percent_done", 0.0)),
+                            int(msg.get("bytes_done", 0)),
+                            int(msg.get("total_bytes", 0)),
+                        )
+                    # progress is shown in the tray — skip logging status lines
+                elif mtype == "summary":
+                    if on_output:
+                        on_output(
+                            f"Done — {msg.get('files_new', 0)} new files, "
+                            f"{fmt_bytes(msg.get('data_added', 0))} added"
+                        )
+                elif on_output:
+                    on_output(raw)
+            except (json.JSONDecodeError, ValueError):
                 if on_output:
-                    on_output(
-                        f"Done — {msg.get('files_new', 0)} new files, "
-                        f"{fmt_bytes(msg.get('data_added', 0))} added"
-                    )
-            elif on_output:
-                on_output(raw)
-        except (json.JSONDecodeError, ValueError):
-            if on_output:
-                on_output(raw)
+                    on_output(raw)
 
-    proc.wait()
-    return proc.returncode, "\n".join(lines)
+        proc.wait()
+        return proc.returncode, "\n".join(lines)
+    finally:
+        if excl_file:
+            try:
+                os.unlink(excl_file)
+            except OSError:
+                pass
 
 
 def fmt_bytes(n: float) -> str:
