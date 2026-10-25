@@ -87,6 +87,30 @@ pip install .
 restic-box
 ```
 
+## Auto-split
+
+restic-box can split large backup sources into independent snapshot units. This is useful when backing up very large directories (hundreds of GB or more) — if a backup run is interrupted, only one piece needs to be re-read and re-uploaded instead of the entire source.
+
+### How it works
+
+With a threshold set (e.g. **100 GiB**):
+
+- A directory **below** the threshold is backed up as a single unit, unchanged. Existing snapshots of it stay valid parents.
+- A directory **at or above** the threshold is split:
+  - Each child directory at or above the threshold is split recursively.
+  - Each loose file at or above the threshold becomes its own unit.
+  - Everything else (small children, small loose files, anything created later) goes into one **"rest"** unit: the directory itself with the big children/files excluded.
+- The rest unit runs first (quick snapshot of the small stuff), then big pieces run smallest-to-largest.
+
+### Enabling it
+
+Open **Settings** → **Options** and set **Auto-split (GiB)** to a positive number. `0` (the default) means autosplitting is off — all sources are backed up as configured, no splitting applied.
+
+### Notes
+
+- A fresh split plan is computed on every backup run from current filesystem sizes — no stale plans.
+- If the plan changes between runs, the new unit boundaries mean previous parent snapshots are no longer valid for those units (the next backup will fully re-read them, but will still dedup against restic's global object store).
+
 ## Configuration
 
 On first run, open **Settings** from the tray menu to configure:
