@@ -768,9 +768,14 @@ class ResticIndicator:
             unit_totals: dict[int, float] = {}
             all_ok = True
             run_total_size = 0.0
+            run_uploaded_size = 0.0
             self._last_progress_ts = 0.0
             self._backup_dirs = dirs
             self._backup_item_count = len(dirs)
+            self._current_backup_done = 0.0
+            self._current_backup_total = 0.0
+            run_scanned_so_far = 0.0
+            run_total_size_estimate = sum(d.cached_size for d in dirs)
             msg, total_pct = self._backup_progress_msg(0.0, 0.0, 0.0)
             GLib.idle_add(self._set_state, BackupState.RUNNING, msg, total_pct)
             for index, d in enumerate(dirs):
@@ -780,7 +785,7 @@ class ResticIndicator:
                 self._current_backup_total = 0.0
                 msg, total_pct = self._backup_progress_msg(0.0, 0.0, 0.0)
                 GLib.idle_add(self._set_state, BackupState.RUNNING, msg, total_pct)
-                rc, _out = runner.run_backup(
+                rc, _out, data_added = runner.run_backup(
                     self._cfg, d,
                     on_output=self._log,
                     on_progress=self._on_progress,
@@ -793,9 +798,17 @@ class ResticIndicator:
                     self._log(f"ERROR: backup of {d.path} failed (rc={rc})")
                 if rc in (runner.RC_OK, runner.RC_PARTIAL):
                     run_total_size += self._current_backup_total
+                    run_uploaded_size += data_added
                     if self._current_backup_total > 0:
                         d.cached_size = self._current_backup_total
                         unit_totals[id(d)] = self._current_backup_total
+                        run_scanned_so_far += self._current_backup_total
+                remaining = max(run_total_size_estimate - run_scanned_so_far, 0)
+                GLib.idle_add(
+                    self._log,
+                    f"Totals: {runner.fmt_bytes(run_uploaded_size)} uploaded"
+                    + (f" / {runner.fmt_bytes(remaining)} remaining" if remaining > 0 else ""),
+                )
                 if self._stop_requested.is_set():
                     self._log("Backup stopped by user — remaining directories skipped.")
                     GLib.idle_add(self._set_state, BackupState.IDLE, "Stopped")

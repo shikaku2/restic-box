@@ -136,11 +136,16 @@ def run_backup(
     on_output: OutputCallback = None,
     on_progress: ProgressCallback = None,
     on_proc: ProcCallback = None,
-) -> tuple[int, str]:
-    """Run restic backup with --json output for progress streaming."""
+) -> tuple[int, str, int]:
+    """Run restic backup with --json output for progress streaming.
+
+    Returns ``(returncode, output_lines, data_added)`` where *data_added*
+    is the number of bytes uploaded to the repository (0 if no summary).
+    """
     ensure_ssh_config(cfg)
     args = ["backup", *targets_of(directory), f"--compression={cfg.compression}", "--json"]
     excl_file: str | None = None
+    result_data_added: int = 0
     if len(directory.excludes) > 200:
         # split "rest" units can carry thousands of excludes; keep argv small
         fd, excl_file = tempfile.mkstemp(prefix="restic-box-excl-", suffix=".txt")
@@ -178,11 +183,13 @@ def run_backup(
                         )
                     # progress is shown in the tray — skip logging status lines
                 elif mtype == "summary":
+                    data_added = msg.get("data_added", 0)
                     if on_output:
                         on_output(
                             f"Done — {msg.get('files_new', 0)} new files, "
-                            f"{fmt_bytes(msg.get('data_added', 0))} added"
+                            f"{fmt_bytes(data_added)} added"
                         )
+                    result_data_added = data_added
                 elif on_output:
                     on_output(raw)
             except (json.JSONDecodeError, ValueError):
@@ -190,7 +197,7 @@ def run_backup(
                     on_output(raw)
 
         proc.wait()
-        return proc.returncode, "\n".join(lines)
+        return proc.returncode, "\n".join(lines), result_data_added
     finally:
         if excl_file:
             try:
