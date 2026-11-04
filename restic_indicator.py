@@ -17,7 +17,6 @@ from collections import defaultdict
 from datetime import date, datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Callable
 
 import cairo
 import gi
@@ -513,6 +512,9 @@ class ResticIndicator:
         self._backup_item_index: int = 0
         self._backup_item_count: int = 0
         self._backup_dirs: list = []
+        self._run_scanned_so_far: float = 0.0
+        self._run_total_size_estimate: float = 0.0
+        self._current_unit_scan_size: float = 0.0
         self._mount_proc: subprocess.Popen | None = None
         self._mount_spinner_id: int | None = None
         self._mount_frame: int = 0
@@ -626,8 +628,22 @@ class ResticIndicator:
             done_weight += dirs[i].cached_size * current_pct
         return done_weight / total_weight
 
-    def _backup_progress_msg(self, pct: float, done: float, total: float) -> tuple[str, float]:
-        total_pct = self._weighted_total_pct(pct)
+    def _progress_pct(self, pct: float) -> float:
+        # Scan-size weighted, including the in-flight fraction of the current
+        # unit, so the tray percentage advances during a single long unit too
+        # rather than only at unit boundaries.
+        total = self._run_total_size_estimate
+        if total <= 0:
+            return self._weighted_total_pct(pct)
+        cur = self._current_unit_scan_size
+        return min(1.0, (self._run_scanned_so_far + cur * pct) / total)
+
+    def _backup_progress_msg(
+        self, pct: float, done: float, total: float,
+        scanned: float = 0.0, total_estimate: float = 0.0,
+    ) -> tuple[str, float]:
+        total_pct = self._progress_pct(pct)
+
         done_s = runner.fmt_bytes(int(done))
         total_s = runner.fmt_bytes(int(total)) if total else "?"
         msg = f"Total: {total_pct*100:.0f}% Uploading: {pct*100:.0f}% ({done_s} / {total_s})"
@@ -662,7 +678,11 @@ class ResticIndicator:
             return
         self._last_progress_ts = now
 
-        msg, total_pct = self._backup_progress_msg(pct, done, total)
+        msg, total_pct = self._backup_progress_msg(
+            pct, done, total,
+            scanned=self._run_scanned_so_far,
+            total_estimate=self._run_total_size_estimate,
+        )
         GLib.idle_add(self._set_state, BackupState.RUNNING, msg, total_pct)
 
     # --- log ---
@@ -774,12 +794,17 @@ class ResticIndicator:
             self._backup_item_count = len(dirs)
             self._current_backup_done = 0.0
             self._current_backup_total = 0.0
-            run_scanned_so_far = 0.0
-            run_total_size_estimate = sum(d.cached_size for d in dirs)
+            self._run_scanned_so_far = 0.0
+            self._current_unit_scan_size = 0.0
+            # cached_size here is the scan size (split units carry it from the
+            # scan; unsplit sources now get it too), so progress % is accurate.
+            scan_sizes = [d.cached_size for d in dirs]
+            self._run_total_size_estimate = sum(scan_sizes)
             msg, total_pct = self._backup_progress_msg(0.0, 0.0, 0.0)
             GLib.idle_add(self._set_state, BackupState.RUNNING, msg, total_pct)
             for index, d in enumerate(dirs):
                 self._backup_item_index = index
+                self._current_unit_scan_size = scan_sizes[index]
                 self._log(f"Backing up [{index + 1}/{len(dirs)}]: " + " + ".join(runner.targets_of(d)))
                 self._current_backup_done = 0.0
                 self._current_backup_total = 0.0
@@ -799,14 +824,16 @@ class ResticIndicator:
                 if rc in (runner.RC_OK, runner.RC_PARTIAL):
                     run_total_size += self._current_backup_total
                     run_uploaded_size += data_added
+                    # Persist the actual stored size, but advance progress by the
+                    # scan size so the % matches the estimate.
                     if self._current_backup_total > 0:
                         d.cached_size = self._current_backup_total
                         unit_totals[id(d)] = self._current_backup_total
-                        run_scanned_so_far += self._current_backup_total
-                remaining = max(run_total_size_estimate - run_scanned_so_far, 0)
+                    self._run_scanned_so_far += scan_sizes[index]
+                remaining = max(self._run_total_size_estimate - self._run_scanned_so_far, 0)
                 GLib.idle_add(
                     self._log,
-                    f"Totals: {runner.fmt_bytes(run_uploaded_size)} uploaded"
+                    f"Totals: {runner.fmt_bytes(self._run_scanned_so_far)} scanned"
                     + (f" / {runner.fmt_bytes(remaining)} remaining" if remaining > 0 else ""),
                 )
                 if self._stop_requested.is_set():
@@ -1100,8 +1127,15 @@ class ResticIndicator:
             return datetime.now().hour >= self._cfg.backup_daily_hour
         return False
 
+    def _is_queued(self, op: str) -> bool:
+        with self._queue_lock:
+            return op in self._queued
+
     def _schedule_backup(self) -> bool:
-        if self._backup_due():
+        # A run already in progress counts as "not due": last_backup_ts is only
+        # updated at completion, so during a long backup the scheduler would
+        # otherwise re-fire every tick and log a duplicate-skip pair.
+        if not self._is_queued("backup") and self._backup_due():
             self._log("Scheduled backup triggered.")
             self._trigger_backup(automatic=True)
         return True
@@ -1120,7 +1154,9 @@ class ResticIndicator:
         return True  # daily
 
     def _schedule_check(self) -> bool:
-        if self._check_due():
+        # Same as _schedule_backup: skip silently when a check is already queued,
+        # so the 60s tick doesn't re-log "triggered" + "already queued" each time.
+        if not self._is_queued("check") and self._check_due():
             self._log("Scheduled check — running restic check.")
             self._trigger_check(automatic=True)
         return True  # keep repeating

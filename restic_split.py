@@ -228,5 +228,9 @@ def expand(directory, threshold_gib: int, log: LogFn = None) -> list:
             log(f"Split planning failed for {directory.path} ({exc}); backing up whole.")
         return [directory]
     if len(plan) == 1 and plan[0].kind == "dir" and not plan[0].paths:
+        # Unsplit source: carry the fresh scan size through so progress has an
+        # accurate estimate even on the first run (cached_size was stale/zero).
+        if plan[0].size:
+            directory.cached_size = float(plan[0].size)
         return [directory]
     return [Target(u.path, u.excludes, u.size, u.paths or None, directory) for u in plan]

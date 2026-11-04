@@ -620,42 +620,42 @@ class SettingsDialog(Gtk.Dialog):
         self._combo_bsched.connect("changed", _on_bsched_changed)
         _on_bsched_changed(self._combo_bsched)
 
-        g.attach(Gtk.Label(label="Check interval:", xalign=1.0), 0, 5, 1, 1)
+        g.attach(Gtk.Label(label="Check interval:", xalign=1.0), 0, 6, 1, 1)
         self._combo_interval = Gtk.ComboBoxText()
         for opt in ("daily", "weekly"):
             self._combo_interval.append_text(opt)
         self._combo_interval.set_active(0 if cfg.check_interval == "daily" else 1)
-        g.attach(self._combo_interval, 1, 5, 1, 1)
+        g.attach(self._combo_interval, 1, 6, 1, 1)
 
         _days = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
         self._lbl_day = Gtk.Label(label="Check day:", xalign=1.0)
         self._lbl_day.set_no_show_all(True)
-        g.attach(self._lbl_day, 0, 6, 1, 1)
+        g.attach(self._lbl_day, 0, 7, 1, 1)
         self._combo_day = Gtk.ComboBoxText()
         for d in _days:
             self._combo_day.append_text(d)
         self._combo_day.set_active(cfg.check_day)
         self._combo_day.set_no_show_all(True)
-        g.attach(self._combo_day, 1, 6, 1, 1)
+        g.attach(self._combo_day, 1, 7, 1, 1)
 
-        g.attach(Gtk.Label(label="Auto-split (GiB):", xalign=1.0), 0, 11, 1, 1)
+        g.attach(Gtk.Label(label="Auto-split (GiB):", xalign=1.0), 0, 12, 1, 1)
         self._spin_split = Gtk.SpinButton.new_with_range(0, 100000, 10)
         self._spin_split.set_value(cfg.split_threshold_gib)
         self._spin_split.set_tooltip_text(
             "0 = off. Split plans are freshly computed on each backup run.")
-        g.attach(self._spin_split, 1, 11, 1, 1)
+        g.attach(self._spin_split, 1, 12, 1, 1)
         self._lbl_split_note = Gtk.Label(
             "<i>Large sources are split into independent snapshots — interrupted "
             "uploads only re-read one piece. Existing backups are used as parents "
             "for deduplication.</i>",
             use_markup=True, wrap=True, xalign=0.0)
         self._lbl_split_note.set_no_show_all(False)
-        g.attach(self._lbl_split_note, 1, 12, 2, 1)
+        g.attach(self._lbl_split_note, 1, 13, 2, 1)
 
-        g.attach(Gtk.Label(label="Check hour:", xalign=1.0), 0, 7, 1, 1)
+        g.attach(Gtk.Label(label="Check hour:", xalign=1.0), 0, 8, 1, 1)
         self._spin_hour = Gtk.SpinButton.new_with_range(0, 23, 1)
         self._spin_hour.set_value(cfg.check_hour)
-        g.attach(self._spin_hour, 1, 7, 1, 1)
+        g.attach(self._spin_hour, 1, 8, 1, 1)
 
         def _on_interval_changed(_combo: Gtk.ComboBoxText) -> None:
             weekly = self._combo_interval.get_active_text() == "weekly"
@@ -666,20 +666,20 @@ class SettingsDialog(Gtk.Dialog):
 
         self._chk_subset = Gtk.CheckButton(label="Read data subset during check")
         self._chk_subset.set_active(cfg.check_read_data_subset)
-        g.attach(self._chk_subset, 1, 8, 2, 1)
+        g.attach(self._chk_subset, 1, 9, 2, 1)
 
         self._lbl_subset = Gtk.Label(label="Subsets total:", xalign=1.0)
-        g.attach(self._lbl_subset, 0, 9, 1, 1)
+        g.attach(self._lbl_subset, 0, 10, 1, 1)
         self._spin_subset = Gtk.SpinButton.new_with_range(10, 1000, 10)
         self._spin_subset.set_value(cfg.check_subset_total)
-        g.attach(self._spin_subset, 1, 9, 1, 1)
+        g.attach(self._spin_subset, 1, 10, 1, 1)
 
         self._lbl_subset_note = Gtk.Label(xalign=0.0)
         self._lbl_subset_note.set_markup(
             f"<i>Verifies 1/N of stored data per check — cycles through everything over N checks.\n"
             f"Next check: subset {cfg.check_subset_current}/{cfg.check_subset_total}.</i>"
         )
-        g.attach(self._lbl_subset_note, 0, 10, 3, 1)
+        g.attach(self._lbl_subset_note, 0, 11, 3, 1)
 
         def _on_subset_toggled(_chk: Gtk.CheckButton) -> None:
             on = self._chk_subset.get_active()
