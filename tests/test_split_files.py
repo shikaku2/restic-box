@@ -142,7 +142,7 @@ class HardlinkTest(unittest.TestCase):
             # Hard link
             os.link(src, os.path.join(root, "link.bin"))
             # Scan should count 20MB total, not 40MB
-            size, children, bigfiles = split.scan(root, [], 10 * MIB)
+            size, children, bigfiles, smallfiles = split.scan(root, [], 10 * MIB)
             self.assertEqual(size[root], 20 * MIB, "Hard links should be deduplicated")
             # Only one unit (the original file), not two
             units = split.build_plan(root, [], 5 * MIB)
@@ -172,6 +172,102 @@ class EdgeCaseTest(unittest.TestCase):
             self.assertEqual(units[0].size, 0)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class LooseFileGroupingTest(unittest.TestCase):
+    """A flat directory of medium-sized loose files must split into group units.
+
+    This is the shape of a games folder or a photo archive: nothing individual
+    reaches the threshold, but the pile does — so without grouping it is one unit
+    that can never finish (and therefore can never be restored from).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rb-split-grp-")
+        self.root = os.path.join(self.tmp, "games")
+        os.makedirs(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fill(self, count: int, size: int) -> list[str]:
+        paths = []
+        for i in range(count):
+            p = os.path.join(self.root, f"game {i:03d}.bin")
+            _write(p, size)
+            paths.append(p)
+        return paths
+
+    def test_flat_pile_splits_into_groups(self):
+        paths = self._fill(12, 3 * MIB)          # 36 MiB of 3 MiB files, T = 10 MiB
+        units = split.build_plan(self.root, [], THRESHOLD)
+        groups = [u for u in units if u.kind == "group"]
+        self.assertGreaterEqual(len(groups), 3, "36 MiB of leftovers must become groups")
+        self.assertTrue([u for u in units if u.kind == "rest"], "rest unit still present")
+
+        for u in groups:
+            self.assertLessEqual(u.size, THRESHOLD, "group stays at or under T")
+            self.assertLessEqual(len(u.paths), split.MAX_UNIT_PATHS)
+        carved = [p for u in groups for p in u.paths]
+        self.assertEqual(sorted(carved), sorted(paths), "every file grouped exactly once")
+
+    def test_leftovers_below_threshold_are_not_grouped(self):
+        _write(os.path.join(self.root, "huge.img"), 12 * MIB)
+        _write(os.path.join(self.root, "tiny.txt"), 1 * MIB)
+        units = split.build_plan(self.root, [], THRESHOLD)
+        self.assertFalse([u for u in units if u.kind == "group"],
+                         "1 MiB of leftovers does not deserve a unit")
+        file_units = [u for u in units if u.kind == "file"]
+        self.assertEqual([u.path for u in file_units], [os.path.join(self.root, "huge.img")])
+        rest = [u for u in units if u.kind == "rest"][0]
+        self.assertFalse(any("tiny" in e for e in rest.excludes),
+                         "small leftovers stay inside the rest unit")
+
+    def test_group_path_count_is_capped(self):
+        paths = self._fill(900, 20 * 1024)       # 18 MiB across 900 small files
+        units = split.build_plan(self.root, [], THRESHOLD)
+        groups = [u for u in units if u.kind == "group"]
+        self.assertTrue(groups)
+        for u in groups:
+            self.assertLessEqual(len(u.paths), split.MAX_UNIT_PATHS, "argv stays manageable")
+            self.assertLessEqual(u.size, THRESHOLD)
+        carved = {p for u in groups for p in u.paths}
+        self.assertEqual(carved, set(paths), "capping must not drop files")
+
+    @unittest.skipUnless(shutil.which("restic"), "restic not installed")
+    def test_restic_actually_backs_up_every_grouped_file(self):
+        paths = self._fill(9, 3 * MIB)
+        units = split.build_plan(self.root, [], THRESHOLD)
+        self.assertGreater(len(units), 1, "grouping should have kicked in")
+
+        env = dict(os.environ, RESTIC_PASSWORD="x", RESTIC_REPOSITORY=os.path.join(self.tmp, "repo"))
+        subprocess.run(["restic", "init", "-q"], env=env, check=True)
+        for u in units:
+            args = ["restic", "backup", "-q", *u.targets()]
+            for e in u.excludes:
+                args += ["--exclude", e]
+            subprocess.run(args, env=env, check=True)
+
+        seen = _all_files_in_repo(env)
+        self.assertEqual(seen, set(paths), "group units must cover the whole pile")
+
+
+def _all_files_in_repo(env: dict) -> set:
+    """Every file path present across all snapshots in the repository *env* points at."""
+    import json
+    snaps = subprocess.run(["restic", "snapshots", "--json"], env=env,
+                           capture_output=True, text=True, check=True)
+    seen = set()
+    for snap in json.loads(snaps.stdout):
+        ls = subprocess.run(["restic", "ls", "--json", snap["id"]], env=env,
+                            capture_output=True, text=True, check=True)
+        for line in ls.stdout.splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if entry.get("type") == "file":
+                seen.add(entry["path"])
+    return seen
 
 
 def _make_dir(path):

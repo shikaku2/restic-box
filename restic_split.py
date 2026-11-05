@@ -10,10 +10,16 @@ Rules (T = threshold):
     valid parents.
   * A directory >= T is split. Each child directory >= T is split recursively.
     Each loose file >= T becomes its own unit (restic accepts file targets).
-  * Everything else in that directory (small children, small loose files,
-    anything created later) goes into one "rest" unit: the directory itself with
-    the big children/files excluded. Coverage is guaranteed by restic's own
-    excludes, not by the scan, so a stale plan can never drop files.
+  * If the leftovers of that directory (small children and small loose files
+    together) still weigh >= T, they are packed into "group" units of at most T
+    bytes each — one multi-path snapshot per group. This is what makes a flat
+    pile of medium-sized files (a photo archive, a media library) splittable
+    instead of one unfinishable unit.
+  * Everything left over (including anything created later) goes into one "rest"
+    unit: the directory itself with the carved children/files excluded. Coverage
+    is guaranteed by restic's own excludes, not by the scan, so a stale plan can
+    never drop files — and a directory whose file list is dropped (too many
+    entries) simply leaves its files in the rest unit.
 
 Sizes are allocated bytes (st_blocks * 512, like `du`), so sparse images count
 for what they actually hold.
@@ -30,6 +36,9 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 GIB = 1024 ** 3
+
+MAX_LISTED_FILES = 50_000  # per directory; above this the small-file list is dropped
+MAX_UNIT_PATHS = 400       # keeps a group unit's argv manageable
 
 LogFn = Optional[Callable[[str], None]]
 
@@ -85,24 +94,31 @@ def _listdir(path: str) -> list[os.DirEntry]:
 
 
 def scan(root: str, excludes: list[str], threshold: int, log: LogFn = None):
-    """Iterative post-order walk. Returns (size, children, bigfiles) dicts keyed
-    by directory path. Never follows symlinks. Always skips `.zfs` (touching it
-    auto-mounts snapshots)."""
+    """Iterative post-order walk. Returns (size, children, bigfiles, smallfiles)
+    dicts keyed by directory path. Never follows symlinks. Always skips `.zfs`
+    (touching it auto-mounts snapshots).
+
+    bigfiles[d]  — loose files in d at or above threshold (each becomes its own unit)
+    smallfiles[d] — the rest of d's loose files, or None if there were too many to
+                    list (those files are then left to the "rest" unit)
+    """
     match = _matcher(excludes)
     size: dict[str, int] = {}
     children: dict[str, list[str]] = {}
     bigfiles: dict[str, list[tuple[str, int]]] = {}
+    smallfiles: dict[str, Optional[list[tuple[str, int]]]] = {}
     seen_inodes: set[tuple[int, int]] = set()
     n_entries = 0
     last_log = time.monotonic()
 
-    # frame: [path, entries, index, bytes, child_dirs, big_files]
-    frames = [[root, _listdir(root), 0, 0, [], []]]
+    # frame: [path, entries, index, bytes, child_dirs, big_files, small_files]
+    frames = [[root, _listdir(root), 0, 0, [], [], []]]
     while frames:
         f = frames[-1]
         if f[2] >= len(f[1]):
             frames.pop()
-            size[f[0]], children[f[0]], bigfiles[f[0]] = f[3], f[4], f[5]
+            size[f[0]], children[f[0]] = f[3], f[4]
+            bigfiles[f[0]], smallfiles[f[0]] = f[5], f[6]
             if frames:
                 frames[-1][3] += f[3]
                 frames[-1][4].append(f[0])
@@ -118,7 +134,7 @@ def scan(root: str, excludes: list[str], threshold: int, log: LogFn = None):
             continue
         try:
             if e.is_dir(follow_symlinks=False):
-                frames.append([e.path, _listdir(e.path), 0, 0, [], []])
+                frames.append([e.path, _listdir(e.path), 0, 0, [], [], []])
                 continue
             st = e.stat(follow_symlinks=False)
         except OSError:
@@ -131,35 +147,45 @@ def scan(root: str, excludes: list[str], threshold: int, log: LogFn = None):
             else:
                 seen_inodes.add(key)
         f[3] += sz
-        if stat.S_ISREG(st.st_mode) and sz >= threshold:
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if sz >= threshold:
             f[5].append((e.path, sz))
-    return size, children, bigfiles
+        elif f[6] is not None:
+            f[6].append((e.path, sz))
+            if len(f[6]) > MAX_LISTED_FILES:
+                f[6] = None  # too many to plan individually; the rest unit covers them
+    return size, children, bigfiles, smallfiles
 
 
 def build_plan(root: str, excludes: list[str], threshold: int, log: LogFn = None) -> list[Unit]:
     root = os.path.normpath(root)
     if not os.path.isdir(root):
         return [Unit(root, list(excludes), 0.0, "dir")]
-    size, children, bigfiles = scan(root, excludes, threshold, log)
-    return plan_from_scan(root, excludes, threshold, size, children, bigfiles, log)
+    size, children, bigfiles, smallfiles = scan(root, excludes, threshold, log)
+    return plan_from_scan(root, excludes, threshold, size, children,
+                          bigfiles, smallfiles, log)
 
 
 def plan_from_scan(root: str, excludes: list[str], threshold: int,
-                   size: dict, children: dict, bigfiles: dict, log: LogFn = None) -> list[Unit]:
+                   size: dict, children: dict, bigfiles: dict,
+                   smallfiles: Optional[dict] = None, log: LogFn = None) -> list[Unit]:
     """Pure planning step (no filesystem access), split out so it can be tested."""
     base = list(excludes)
+    smallfiles = smallfiles if smallfiles is not None else {}
 
-    def pack(paths: list[str]) -> list[list[str]]:
-        """First-fit-decreasing into bins of at most `threshold` bytes."""
+    def pack(items: list[tuple[str, int]]) -> list[list[str]]:
+        """First-fit-decreasing into bins of at most *threshold* bytes and at most
+        MAX_UNIT_PATHS paths each (keeps a group unit's argv manageable)."""
         bins: list[list] = []  # [used, [paths]]
-        for c in sorted(paths, key=lambda c: (-size[c], c)):
+        for path, sz in sorted(items, key=lambda it: (-it[1], it[0])):
             for b in bins:
-                if b[0] + size[c] <= threshold:
-                    b[0] += size[c]
-                    b[1].append(c)
+                if b[0] + sz <= threshold and len(b[1]) < MAX_UNIT_PATHS:
+                    b[0] += sz
+                    b[1].append(path)
                     break
             else:
-                bins.append([size[c], [c]])
+                bins.append([sz, [path]])
         return [sorted(b[1]) for b in bins]
 
     def split(d: str) -> list[Unit]:
@@ -168,6 +194,7 @@ def plan_from_scan(root: str, excludes: list[str], threshold: int,
         big_dirs = sorted(c for c in children[d] if size[c] >= threshold)
         small_dirs = [c for c in children[d] if size[c] < threshold]
         big_files = bigfiles[d]
+        small_files = smallfiles.get(d) or []
         subs: list[Unit] = []
         rest_ex = list(base)
         carved = 0
@@ -179,16 +206,19 @@ def plan_from_scan(root: str, excludes: list[str], threshold: int,
             subs.append(Unit(fp, list(base), float(fs), "file"))
             rest_ex.append(escape_pattern(fp))
             carved += fs
-        # If the small children alone would still make one huge "rest" unit,
-        # pack them into groups of at most T (one multi-path snapshot each).
-        if sum(size[c] for c in small_dirs) >= threshold:
-            for grp in pack(small_dirs):
-                subs.append(Unit(grp[0], list(base), float(sum(size[c] for c in grp)),
-                                 "group", paths=grp))
+        # If what's left would still make one huge "rest" unit, group it: small
+        # child dirs and small loose files alike, binned to at most T each. A flat
+        # flat directory of medium-sized files is splittable this way.
+        leftovers = [(c, size[c]) for c in small_dirs] + list(small_files)
+        if sum(sz for _, sz in leftovers) >= threshold:
+            sz_of = dict(leftovers)
+            for grp in pack(leftovers):
+                subs.append(Unit(grp[0], list(base),
+                                 float(sum(sz_of[p] for p in grp)), "group", paths=grp))
                 for c in grp:
                     rest_ex.append(escape_pattern(c))
-                    carved += size[c]
-        if not subs:  # big only because of a pile of small loose files
+                    carved += sz_of[c]
+        if not subs:  # nothing carvable: leftovers too small to group, or too many
             return [Unit(d, list(base), float(size[d]), "dir")]
         subs.sort(key=lambda u: u.size)
         # "rest" first: quick snapshot of the small stuff, then smallest-to-largest.

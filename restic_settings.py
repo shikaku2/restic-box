@@ -645,9 +645,9 @@ class SettingsDialog(Gtk.Dialog):
             "0 = off. Split plans are freshly computed on each backup run.")
         g.attach(self._spin_split, 1, 12, 1, 1)
         self._lbl_split_note = Gtk.Label(
-            "<i>Large sources are split into independent snapshots — interrupted "
-            "uploads only re-read one piece. Existing backups are used as parents "
-            "for deduplication.</i>",
+            "<i>Large sources are split into independent snapshots — finished units "
+            "are restorable, and an interrupted unit only re-uploads the missing "
+            "data. Existing backups are used as parents for deduplication.</i>",
             use_markup=True, wrap=True, xalign=0.0)
         self._lbl_split_note.set_no_show_all(False)
         g.attach(self._lbl_split_note, 1, 13, 2, 1)

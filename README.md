@@ -89,7 +89,7 @@ restic-box
 
 ## Auto-split
 
-restic-box can split large backup sources into independent snapshot units. This is useful when backing up very large directories (hundreds of GB or more) — if a backup run is interrupted, only one piece needs to be re-read and re-uploaded instead of the entire source.
+restic-box can split large backup sources into independent snapshot units. This is useful when backing up very large directories (hundreds of GB or more) — if a backup run is interrupted, every finished unit is already a complete, restorable snapshot, and the interrupted unit re-reads from its start while uploading only the data still missing (restic dedups against the repository).
 
 ### How it works
 
@@ -99,7 +99,8 @@ With a threshold set (e.g. **100 GiB**):
 - A directory **at or above** the threshold is split:
   - Each child directory at or above the threshold is split recursively.
   - Each loose file at or above the threshold becomes its own unit.
-  - Everything else (small children, small loose files, anything created later) goes into one **"rest"** unit: the directory itself with the big children/files excluded.
+  - If the leftovers (small children and small loose files together) still weigh at or above the threshold, they are packed into **"group"** units of at most the threshold each — one multi-path snapshot per group. This is what makes a flat folder of medium-sized files (a games folder, a photo archive) splittable instead of one unfinishable unit.
+  - Everything left over (unpacked leftovers, anything created later) goes into one **"rest"** unit: the directory itself with the carved children/files excluded.
 - The rest unit runs first (quick snapshot of the small stuff), then big pieces run smallest-to-largest.
 
 ### Enabling it

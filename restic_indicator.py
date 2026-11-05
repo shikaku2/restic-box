@@ -13,7 +13,6 @@ import sys
 import tempfile
 import threading
 import traceback
-from collections import defaultdict
 from datetime import date, datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -28,8 +27,10 @@ from gi.repository import AppIndicator3, GLib, Gio, Gtk  # type: ignore[attr-def
 import restic_config as cfg_mod
 import restic_runner as runner
 import restic_split as split
+import restic_views as views
 from restic_settings import SettingsDialog
 from restic_status import LogWindow
+from restic_views import set_tree_readonly as _set_tree_readonly
 
 
 def _inhibit_sleep() -> int | None:
@@ -70,15 +71,6 @@ _ICON_DIR = tempfile.mkdtemp(prefix="restic-box-")
 _ICON_SLOT = ("a", "b")
 
 ICON_SIZE = 64
-
-
-def _set_tree_readonly(path: Path, readonly: bool) -> None:
-    """Recursively chmod directories under path to 0o555 (readonly) or 0o755."""
-    if not path.exists():
-        return
-    mode = 0o555 if readonly else 0o755
-    for root, dirs, _ in os.walk(str(path)):
-        os.chmod(root, mode)
 
 
 class BackupState(Enum):
@@ -1043,72 +1035,19 @@ class ResticIndicator:
     def _build_friendly_views(self) -> None:
         try:
             snaps = runner.run_snapshots_json(self._cfg)
-            self._build_latest(snaps)
-            self._build_bydate(snaps)
+            latest = views.build_latest(_LATEST_PATH, _RAW_MOUNT_PATH, snaps,
+                                        ls_children=self._ls_children, log=self._log)
+            bydate = views.build_bydate(_BYDATE_PATH, _RAW_MOUNT_PATH, snaps,
+                                        ls_children=self._ls_children, log=self._log)
+            self._log(f"[mount] Built latest/ ({latest} links) and "
+                      f"bydate/ ({bydate} links) from {len(snaps)} snapshot(s)")
         except Exception as e:
             self._log(f"[mount] Could not build friendly views: {e}")
 
-    def _build_latest(self, snaps: list[dict]) -> None:
-        _set_tree_readonly(_LATEST_PATH, False)
-        shutil.rmtree(_LATEST_PATH, ignore_errors=True)
-        _LATEST_PATH.mkdir(parents=True)
-        sorted_snaps = sorted(snaps, key=lambda s: s.get("time", ""))
-        covered: dict[str, str] = {}  # orig_path → snap_id (newest wins)
-        for snap in sorted_snaps:
-            for path in snap.get("paths") or []:
-                covered[path] = snap.get("id", "")[:8]  # FUSE ids/ uses 8-char short IDs
-        for orig_path, snap_id in covered.items():
-            rel = orig_path.lstrip("/")
-            src = _RAW_MOUNT_PATH / "ids" / snap_id / rel
-            dst = _LATEST_PATH / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.symlink_to(src)
-        _set_tree_readonly(_LATEST_PATH, True)
-
-    def _build_bydate(self, snaps: list[dict]) -> None:
-        _set_tree_readonly(_BYDATE_PATH, False)
-        shutil.rmtree(_BYDATE_PATH, ignore_errors=True)
-        _BYDATE_PATH.mkdir(parents=True)
-        minute_groups: dict[str, dict[str, list[tuple[str, str]]]] = defaultdict(dict)
-        for snap in snaps:
-            t = snap.get("time", "")
-            try:
-                dt = datetime.fromisoformat(t.replace("Z", "+00:00")).astimezone()
-                date = dt.strftime("%Y-%m-%d")
-                time_key = dt.strftime("%H-%M")
-            except Exception:
-                date = t[:10]
-                time_key = t[11:16].replace(":", "-")
-            entry = minute_groups[date].setdefault(time_key, [])
-            for path in snap.get("paths") or []:
-                entry.append((path, snap.get("id", "")[:8]))
-        # Build folder structure: single run → bydate/<date>/paths
-        #                         multiple runs → bydate/<date>/<HH-MM>/paths
-        for date in sorted(minute_groups):
-            runs = minute_groups[date]
-            multi = len(runs) > 1
-            used_times: dict[str, int] = {}
-            for time_key in sorted(runs):
-                if multi:
-                    # Handle same-minute collisions with _2, _3, … suffix
-                    if time_key in used_times:
-                        used_times[time_key] += 1
-                        subfolder = f"{time_key}_{used_times[time_key]}"
-                    else:
-                        used_times[time_key] = 1
-                        subfolder = time_key
-                    base_dir = _BYDATE_PATH / date / subfolder
-                else:
-                    base_dir = _BYDATE_PATH / date
-                base_dir.mkdir(parents=True, exist_ok=True)
-                for orig_path, snap_id in runs[time_key]:
-                    rel = orig_path.lstrip("/")
-                    src = _RAW_MOUNT_PATH / "ids" / snap_id / rel
-                    dst = base_dir / rel
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    if not dst.exists():
-                        dst.symlink_to(src)
-        _set_tree_readonly(_BYDATE_PATH, True)
+    def _ls_children(self, snap_id: str, path: str) -> list[tuple[str, bool]]:
+        """Direct children of *path* within a snapshot — used to fill the corridor
+        directories where a rest unit and a carved nested unit overlap."""
+        return runner.run_ls_children(self._cfg, snap_id, path)
 
     # --- backup scheduler ---
 

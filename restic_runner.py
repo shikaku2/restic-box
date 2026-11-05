@@ -289,6 +289,37 @@ def run_ls_json(cfg: Config, snapshot_id: str) -> list[dict]:
     return entries
 
 
+def run_ls_children(cfg: Config, snapshot_id: str, path: str) -> list[tuple[str, bool]]:
+    """Immediate children of *path* within a snapshot, as restic sees them.
+
+    restic lists the whole subtree under *path*; only the direct children are
+    wanted (names, and whether each is a directory). Tree paths come back absolute
+    because every backup target here is absolute.
+    """
+    ensure_ssh_config(cfg)
+    target = "/" + path.strip("/")
+    want_parent = target if target != "/" else "/"
+    children: list[tuple[str, bool]] = []
+    _, out = run_restic(["ls", "--json", snapshot_id, target], cfg)
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("struct_type") != "node":
+            continue
+        entry_path = entry.get("path") or ""
+        if (entry_path.rsplit("/", 1)[0] or "/") != want_parent:
+            continue
+        name = entry_path.rsplit("/", 1)[-1]
+        if name:
+            children.append((name, entry.get("type") == "dir"))
+    return children
+
+
 def retention_duration(cfg: Config) -> str:
     """Build the --keep-within duration string, e.g. '1y2m3d4h'. Returns '' if all zero."""
     parts = [
