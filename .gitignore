@@ -28,3 +28,6 @@ packaging/.restic-check-ts
 .vscode/
 *.swp
 .claude/
+
+# OpenCode/Claude command dirs (local only; .opencode symlinks to .claude)
+.opencode
