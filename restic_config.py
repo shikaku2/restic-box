@@ -46,6 +46,8 @@ class Config:
     total_backup_size: float = 0.0  # total uncompressed bytes across enabled backup sources
     compressed_backup_size: float = 0.0  # repository-wide compressed bytes, including older snapshots
     inhibit_sleep: bool = True
+    ignore_inode: bool = False   # --ignore-inode on backup; stops full-read churn on CIFS/network shares where inodes/ctime change between backups
+    ignore_ctime: bool = False   # --ignore-ctime on backup; for shares where only ctime drifts (inode numbers stay stable)
     split_threshold_gib: int = 0  # split sources >= this (allocated GiB) into independent snapshots; 0 = off
     retention_enabled: bool = False
     retention_years: int = 0

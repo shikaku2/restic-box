@@ -689,6 +689,30 @@ class SettingsDialog(Gtk.Dialog):
         self._chk_subset.connect("toggled", _on_subset_toggled)
         _on_subset_toggled(self._chk_subset)
 
+        g.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 14, 3, 1)
+
+        self._chk_ignore_inode = Gtk.CheckButton(label="Ignore inode changes (CIFS / network shares)")
+        self._chk_ignore_inode.set_active(cfg.ignore_inode)
+        self._chk_ignore_inode.set_tooltip_text(
+            "Network shares (CIFS/SMB, NFS) can renumber inodes and bump ctime on "
+            "remount or even mid-run, making restic treat unchanged files as new. On "
+            "subsequent backups this shows up as full-read churn: every file is "
+            "re-read from the local mount and unchanged data is re-uploaded. Adds "
+            "--ignore-inode so change detection ignores inode number and ctime, "
+            "relying on size + mtime instead."
+        )
+        g.attach(self._chk_ignore_inode, 1, 15, 2, 1)
+
+        self._chk_ignore_ctime = Gtk.CheckButton(label="Ignore ctime changes only")
+        self._chk_ignore_ctime.set_active(cfg.ignore_ctime)
+        self._chk_ignore_ctime.set_tooltip_text(
+            "Adds --ignore-ctime: ignore only ctime changes when detecting modified "
+            "files. Use it when ctime churns but inode numbers stay stable. "
+            "--ignore-inode above already ignores ctime too, so enabling both is "
+            "redundant but harmless."
+        )
+        g.attach(self._chk_ignore_ctime, 1, 16, 2, 1)
+
         return g
 
     # --- retention tab ---
@@ -781,6 +805,8 @@ class SettingsDialog(Gtk.Dialog):
             compression=self._combo_comp.get_active_text() or "max",
             backup_on_startup=self._chk_startup.get_active(),
             inhibit_sleep=self._chk_inhibit.get_active(),
+            ignore_inode=self._chk_ignore_inode.get_active(),
+            ignore_ctime=self._chk_ignore_ctime.get_active(),
             split_threshold_gib=int(self._spin_split.get_value()),
             backup_schedule=self._combo_bsched.get_active_text() or "disabled",
             backup_interval_hours=int(self._spin_binterval.get_value()),

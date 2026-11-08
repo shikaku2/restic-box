@@ -144,6 +144,14 @@ def run_backup(
     """
     ensure_ssh_config(cfg)
     args = ["backup", *targets_of(directory), f"--compression={cfg.compression}", "--json"]
+    # Network shares (CIFS/SMB/NFS) can renumber inodes and bump ctime between backup
+    # runs even when contents are unchanged; restic then re-reads every file as "new"
+    # (full-read churn, re-uploading unchanged data). --ignore-inode (which also covers
+    # ctime) is the usual fix; --ignore-ctime handles shares where only ctime drifts.
+    if cfg.ignore_inode:
+        args.append("--ignore-inode")
+    if cfg.ignore_ctime:
+        args.append("--ignore-ctime")
     excl_file: str | None = None
     result_data_added: int = 0
     if len(directory.excludes) > 200:

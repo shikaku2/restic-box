@@ -122,6 +122,22 @@ On first run, open **Settings** from the tray menu to configure:
 
 Configuration is saved to `~/.config/restic-box/config.json`.
 
+### Note on network shares (CIFS/SMB/NFS)
+
+Network filesystems often renumber inodes and bump ctime on remount — sometimes even
+mid-backup — even when the file contents haven't changed. restic uses inode + ctime to
+decide whether a file is new, so this can make it re-read and re-upload unchanged files
+as full local reads every run.
+
+In **Settings → Options** you can enable:
+
+- **Ignore inode changes** — adds `--ignore-inode` (ignores inode number *and* ctime,
+  relying on size + mtime). This is the usual fix for CIFS/SMB/NFS sources.
+- **Ignore ctime changes only** — adds `--ignore-ctime`, for sources where only ctime
+  churns but inode numbers stay stable.
+
+Both are off by default. They apply to backup runs (including auto-split units).
+
 ### Note on shared repositories
 
 restic's `backup` command only takes a non-exclusive lock, so it does not prevent two separate machines from backing up to the same repository at the same time — this is expected restic behavior (concurrent backups are safe by design), but it means restic-box has no way to stop you from accidentally pointing two computers at the same repo/path. If you intend a repository to be used by a single machine, make sure only that machine is configured to back up to it.
