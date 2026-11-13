@@ -23,6 +23,11 @@ Rules (T = threshold):
 
 Sizes are allocated bytes (st_blocks * 512, like `du`), so sparse images count
 for what they actually hold.
+
+Across runs the plan is saved (CONFIG_DIR/split-plans) and reused: restic only
+finds a parent snapshot on an exact path-set match, so units keep their path
+sets and excludes unless they grow past drift_factor * T (hysteresis in
+plan_stable()); new files and dirs are always picked up by their "rest" unit.
 """
 
 from __future__ import annotations
@@ -336,7 +341,8 @@ def plan_stable(prev_units: list[Unit], root: str, excludes: list[str], threshol
         for x in units:
             (rest_out if x.kind == "rest" else other_out).append(x)
 
-    for u in prev_units:
+    for u0 in prev_units:
+        u = Unit(u0.path, list(u0.excludes), u0.size, u0.kind, list(u0.paths))  # never mutate the caller's objects
         if u.kind == "dir":
             if u.path not in size:  # gone (or now skipped by the scan)
                 dropped += 1
