@@ -642,15 +642,36 @@ class SettingsDialog(Gtk.Dialog):
         self._spin_split = Gtk.SpinButton.new_with_range(0, 100000, 10)
         self._spin_split.set_value(cfg.split_threshold_gib)
         self._spin_split.set_tooltip_text(
-            "0 = off. Split plans are freshly computed on each backup run.")
+            "0 = off. Plans are saved and reused on later runs (stable unit path "
+            "sets, so restic keeps finding parent snapshots). Only units that "
+            "grow a lot are reshuffled.")
         g.attach(self._spin_split, 1, 12, 1, 1)
+
+        self._lbl_split_drift = Gtk.Label(label="Re-split when a unit grows past x:", xalign=1.0)
+        self._lbl_split_drift.set_tooltip_text(
+            "Hysteresis factor: a saved unit is only repacked or re-split when its "
+            "current size reaches this multiple of the auto-split threshold. "
+            "Lower = more eager reshuffling, higher = more stable plans.")
+        g.attach(self._lbl_split_drift, 0, 13, 1, 1)
+        self._spin_split_drift = Gtk.SpinButton.new_with_range(1.5, 10, 0.5)
+        self._spin_split_drift.set_digits(1)
+        self._spin_split_drift.set_value(getattr(cfg, "split_drift_factor", 2.0))
+        g.attach(self._spin_split_drift, 1, 13, 1, 1)
+
+        self._btn_split_reset = Gtk.Button(label="Reset split plan")
+        self._btn_split_reset.set_tooltip_text(
+            "Delete saved split plans. The next backup computes fresh ones — useful "
+            "as a manual 'defrag' after plans have fragmented.")
+        g.attach(self._btn_split_reset, 2, 13, 1, 1)
+        self._btn_split_reset.connect("clicked", self._reset_split_plans)
+
         self._lbl_split_note = Gtk.Label(
             "<i>Large sources are split into independent snapshots — finished units "
             "are restorable, and an interrupted unit only re-uploads the missing "
             "data. Existing backups are used as parents for deduplication.</i>",
             use_markup=True, wrap=True, xalign=0.0)
         self._lbl_split_note.set_no_show_all(False)
-        g.attach(self._lbl_split_note, 1, 13, 2, 1)
+        g.attach(self._lbl_split_note, 1, 14, 2, 1)
 
         g.attach(Gtk.Label(label="Check hour:", xalign=1.0), 0, 8, 1, 1)
         self._spin_hour = Gtk.SpinButton.new_with_range(0, 23, 1)
@@ -689,7 +710,7 @@ class SettingsDialog(Gtk.Dialog):
         self._chk_subset.connect("toggled", _on_subset_toggled)
         _on_subset_toggled(self._chk_subset)
 
-        g.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 14, 3, 1)
+        g.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 15, 3, 1)
 
         self._chk_ignore_inode = Gtk.CheckButton(label="Ignore inode changes (CIFS / network shares)")
         self._chk_ignore_inode.set_active(cfg.ignore_inode)
@@ -701,7 +722,7 @@ class SettingsDialog(Gtk.Dialog):
             "--ignore-inode so change detection ignores inode number and ctime, "
             "relying on size + mtime instead."
         )
-        g.attach(self._chk_ignore_inode, 1, 15, 2, 1)
+        g.attach(self._chk_ignore_inode, 1, 16, 2, 1)
 
         self._chk_ignore_ctime = Gtk.CheckButton(label="Ignore ctime changes only")
         self._chk_ignore_ctime.set_active(cfg.ignore_ctime)
@@ -711,9 +732,31 @@ class SettingsDialog(Gtk.Dialog):
             "--ignore-inode above already ignores ctime too, so enabling both is "
             "redundant but harmless."
         )
-        g.attach(self._chk_ignore_ctime, 1, 16, 2, 1)
+        g.attach(self._chk_ignore_ctime, 1, 17, 2, 1)
 
         return g
+
+    def _reset_split_plans(self, _btn: Gtk.Button) -> None:
+        """Manual 'defrag': drop saved split plans so the next run rebuilds them."""
+        plan_dir = cfg_mod.CONFIG_DIR / "split-plans"
+        n = 0
+        for f in plan_dir.glob("*.json"):
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+        dlg = Gtk.MessageDialog(
+            transient_for=self, flags=0,
+            message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.OK,
+            text=(f"Deleted {n} saved split plan(s)." if n
+                  else "No saved split plans found."),
+        )
+        dlg.format_secondary_text(
+            "The next backup will compute fresh plans; unit path sets and restic "
+            "parent snapshots may change once for the affected units.")
+        dlg.run()
+        dlg.destroy()
 
     # --- retention tab ---
 
@@ -808,6 +851,7 @@ class SettingsDialog(Gtk.Dialog):
             ignore_inode=self._chk_ignore_inode.get_active(),
             ignore_ctime=self._chk_ignore_ctime.get_active(),
             split_threshold_gib=int(self._spin_split.get_value()),
+            split_drift_factor=float(self._spin_split_drift.get_value()),
             backup_schedule=self._combo_bsched.get_active_text() or "disabled",
             backup_interval_hours=int(self._spin_binterval.get_value()),
             backup_daily_hour=int(self._spin_bdailyhour.get_value()),

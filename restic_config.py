@@ -49,6 +49,7 @@ class Config:
     ignore_inode: bool = False   # --ignore-inode on backup; stops full-read churn on CIFS/network shares where inodes/ctime change between backups
     ignore_ctime: bool = False   # --ignore-ctime on backup; for shares where only ctime drifts (inode numbers stay stable)
     split_threshold_gib: int = 0  # split sources >= this (allocated GiB) into independent snapshots; 0 = off
+    split_drift_factor: float = 2.0  # stable replan: only touch a saved unit that grew past drift_factor * threshold
     retention_enabled: bool = False
     retention_years: int = 0
     retention_months: int = 0

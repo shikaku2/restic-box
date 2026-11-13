@@ -775,7 +775,8 @@ class ResticIndicator:
                 GLib.idle_add(self._set_state, BackupState.RUNNING, "Planning split…")
             units: list = []
             for d in dirs:
-                units += split.expand(d, self._cfg.split_threshold_gib, self._log)
+                units += split.expand(d, self._cfg.split_threshold_gib, self._log,
+                                      self._cfg.split_drift_factor)
             dirs = units
             unit_totals: dict[int, float] = {}
             all_ok = True

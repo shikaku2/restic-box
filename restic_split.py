@@ -28,17 +28,23 @@ for what they actually hold.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
 import os
 import re
 import stat
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
+
+from restic_config import CONFIG_DIR
 
 GIB = 1024 ** 3
 
 MAX_LISTED_FILES = 50_000  # per directory; above this the small-file list is dropped
 MAX_UNIT_PATHS = 400       # keeps a group unit's argv manageable
+PLAN_VERSION = 1           # on-change bump invalidates all saved split plans
 
 LogFn = Optional[Callable[[str], None]]
 
@@ -158,6 +164,50 @@ def scan(root: str, excludes: list[str], threshold: int, log: LogFn = None):
     return size, children, bigfiles, smallfiles
 
 
+def plan_file_path(root: str, threshold_bytes: int, base_excludes: list[str],
+                   plan_dir: Path | None = None) -> Path:
+    """Stable identity of a plan: (root, threshold, base excludes). Any of those
+    changes -> different file -> the saved plan is simply not found."""
+    key = hashlib.sha1(
+        "\0".join([os.path.normpath(root), str(int(threshold_bytes)),
+                   *sorted(base_excludes)]).encode("utf-8", "surrogateescape")
+    ).hexdigest()
+    return (Path(plan_dir) if plan_dir else CONFIG_DIR / "split-plans") / (key + ".json")
+
+
+def load_plan(root: str, base_excludes: list[str], threshold_bytes: int,
+              plan_dir: Path | None = None) -> Optional[list[Unit]]:
+    """Saved plan, or None if missing / corrupt / wrong version."""
+    try:
+        with open(plan_file_path(root, threshold_bytes, base_excludes, plan_dir)) as f:
+            data = json.load(f)
+        if data.get("version") != PLAN_VERSION:
+            return None
+        return [Unit(u["path"], list(u["excludes"]), float(u["size"]), u["kind"],
+                     list(u.get("paths") or []))
+                for u in data["units"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None  # missing, unparseable JSON, or malformed units -> fresh plan
+
+
+def save_plan(root: str, base_excludes: list[str], threshold_bytes: int,
+              units: list[Unit], plan_dir: Path | None = None) -> None:
+    """Atomic write (tmp + os.replace). Best effort: never breaks a backup."""
+    payload = {"version": PLAN_VERSION,
+               "units": [{"kind": u.kind, "path": u.path, "paths": list(u.paths),
+                          "excludes": list(u.excludes), "size": u.size}
+                         for u in units]}
+    p = plan_file_path(root, threshold_bytes, base_excludes, plan_dir)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + f".{os.getpid()}.tmp")
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
 def build_plan(root: str, excludes: list[str], threshold: int, log: LogFn = None) -> list[Unit]:
     root = os.path.normpath(root)
     if not os.path.isdir(root):
@@ -167,69 +217,222 @@ def build_plan(root: str, excludes: list[str], threshold: int, log: LogFn = None
                           bigfiles, smallfiles, log)
 
 
+def _pack(items: list[tuple[str, int]], threshold: int) -> list[list[str]]:
+    """First-fit-decreasing into bins of at most *threshold* bytes and at most
+    MAX_UNIT_PATHS paths each (keeps a group unit's argv manageable)."""
+    bins: list[list] = []  # [used, [paths]]
+    for path, sz in sorted(items, key=lambda it: (-it[1], it[0])):
+        for b in bins:
+            if b[0] + sz <= threshold and len(b[1]) < MAX_UNIT_PATHS:
+                b[0] += sz
+                b[1].append(path)
+                break
+        else:
+            bins.append([sz, [path]])
+    return [sorted(b[1]) for b in bins]
+
+
+def _no_carve(_path: str) -> bool:
+    return False
+
+
+def _carve(d: str, base: list[str], threshold: int, size: dict, children: dict,
+           bigfiles: dict, smallfiles: dict,
+           already_carved: Callable[[str], bool] = _no_carve) -> tuple[list[Unit], list[str], int]:
+    """Carve one directory's children and loose files into subunits.
+    already_carved(p) skips entries a saved plan already carved out (their own
+    units and excludes keep covering them). Returns (subunits, extra exclude
+    patterns for d's rest unit, carved bytes)."""
+    big_dirs = sorted(c for c in children.get(d, [])
+                      if size[c] >= threshold and not already_carved(c))
+    small_dirs = [c for c in children.get(d, [])
+                  if size[c] < threshold and not already_carved(c)]
+    subs: list[Unit] = []
+    added_ex: list[str] = []
+    carved = 0
+    for c in big_dirs:
+        subs += _split_dir(c, base, threshold, size, children, bigfiles, smallfiles)
+        added_ex.append(escape_pattern(c))
+        carved += size[c]
+    for fp, fs in bigfiles.get(d, []):
+        if already_carved(fp):
+            continue
+        subs.append(Unit(fp, list(base), float(fs), "file"))
+        added_ex.append(escape_pattern(fp))
+        carved += fs
+    # If what's left would still make one huge "rest" unit, group it: small
+    # child dirs and small loose files alike, binned to at most T each. A flat
+    # flat directory of medium-sized files is splittable this way.
+    leftovers = ([(c, size[c]) for c in small_dirs]
+                 + [it for it in (smallfiles.get(d) or []) if not already_carved(it[0])])
+    if sum(sz for _, sz in leftovers) >= threshold:
+        sz_of = dict(leftovers)
+        for grp in _pack(leftovers, threshold):
+            subs.append(Unit(grp[0], list(base),
+                             float(sum(sz_of[p] for p in grp)), "group", paths=grp))
+            for c in grp:
+                added_ex.append(escape_pattern(c))
+                carved += sz_of[c]
+    return subs, added_ex, carved
+
+
+def _split_dir(d: str, base: list[str], threshold: int, size: dict, children: dict,
+               bigfiles: dict, smallfiles: dict) -> list[Unit]:
+    """Fresh plan for one directory: either a single unit, or rest + subs."""
+    if size[d] < threshold:
+        return [Unit(d, list(base), float(size[d]), "dir")]
+    subs, added_ex, carved = _carve(d, base, threshold, size, children, bigfiles, smallfiles)
+    if not subs:  # nothing carvable: leftovers too small to group, or too many
+        return [Unit(d, list(base), float(size[d]), "dir")]
+    subs.sort(key=lambda u: u.size)
+    # "rest" first: quick snapshot of the small stuff, then smallest-to-largest.
+    return [Unit(d, list(base) + added_ex, float(max(size[d] - carved, 0)), "rest")] + subs
+
+
 def plan_from_scan(root: str, excludes: list[str], threshold: int,
                    size: dict, children: dict, bigfiles: dict,
                    smallfiles: Optional[dict] = None, log: LogFn = None) -> list[Unit]:
     """Pure planning step (no filesystem access), split out so it can be tested."""
-    base = list(excludes)
     smallfiles = smallfiles if smallfiles is not None else {}
-
-    def pack(items: list[tuple[str, int]]) -> list[list[str]]:
-        """First-fit-decreasing into bins of at most *threshold* bytes and at most
-        MAX_UNIT_PATHS paths each (keeps a group unit's argv manageable)."""
-        bins: list[list] = []  # [used, [paths]]
-        for path, sz in sorted(items, key=lambda it: (-it[1], it[0])):
-            for b in bins:
-                if b[0] + sz <= threshold and len(b[1]) < MAX_UNIT_PATHS:
-                    b[0] += sz
-                    b[1].append(path)
-                    break
-            else:
-                bins.append([sz, [path]])
-        return [sorted(b[1]) for b in bins]
-
-    def split(d: str) -> list[Unit]:
-        if size[d] < threshold:
-            return [Unit(d, list(base), float(size[d]), "dir")]
-        big_dirs = sorted(c for c in children[d] if size[c] >= threshold)
-        small_dirs = [c for c in children[d] if size[c] < threshold]
-        big_files = bigfiles[d]
-        small_files = smallfiles.get(d) or []
-        subs: list[Unit] = []
-        rest_ex = list(base)
-        carved = 0
-        for c in big_dirs:
-            subs += split(c)
-            rest_ex.append(escape_pattern(c))
-            carved += size[c]
-        for fp, fs in big_files:
-            subs.append(Unit(fp, list(base), float(fs), "file"))
-            rest_ex.append(escape_pattern(fp))
-            carved += fs
-        # If what's left would still make one huge "rest" unit, group it: small
-        # child dirs and small loose files alike, binned to at most T each. A flat
-        # flat directory of medium-sized files is splittable this way.
-        leftovers = [(c, size[c]) for c in small_dirs] + list(small_files)
-        if sum(sz for _, sz in leftovers) >= threshold:
-            sz_of = dict(leftovers)
-            for grp in pack(leftovers):
-                subs.append(Unit(grp[0], list(base),
-                                 float(sum(sz_of[p] for p in grp)), "group", paths=grp))
-                for c in grp:
-                    rest_ex.append(escape_pattern(c))
-                    carved += sz_of[c]
-        if not subs:  # nothing carvable: leftovers too small to group, or too many
-            return [Unit(d, list(base), float(size[d]), "dir")]
-        subs.sort(key=lambda u: u.size)
-        # "rest" first: quick snapshot of the small stuff, then smallest-to-largest.
-        return [Unit(d, rest_ex, float(max(size[d] - carved, 0)), "rest")] + subs
-
-    units = split(root)
+    units = _split_dir(root, list(excludes), threshold, size, children, bigfiles, smallfiles)
     if log:
         over = [u for u in units if u.size >= threshold and u.kind in ("dir", "group")]
         log(f"Split plan for {root}: {len(units)} unit(s)"
             + (f"; {len(over)} unsplittable unit(s) still >= threshold" if over else ""))
     return units
+
+
+def plan_stable(prev_units: list[Unit], root: str, excludes: list[str], threshold: int,
+                drift_factor: float, size: dict, children: dict, bigfiles: dict,
+                smallfiles: Optional[dict] = None,
+                exists: Callable[[str], bool] = os.path.lexists,
+                log: LogFn = None) -> list[Unit]:
+    """Re-plan reusing the saved plan (hysteresis): restic only finds a parent
+    snapshot when host + path set match exactly, so untouched units must keep
+    their exact path set and excludes. Only units that drifted past
+    drift_factor * threshold are repacked/resplit/carved; coverage stays
+    guaranteed by every split directory's "rest" unit, which automatically
+    covers anything new. Pure: only reads the dicts from scan() and exists()."""
+    base = list(excludes)
+    smallfiles = smallfiles if smallfiles is not None else {}
+    drift = drift_factor * threshold
+    file_sizes: dict[str, int] = {}
+    for items in bigfiles.values():
+        for p, sz in items:
+            file_sizes[p] = sz
+    for items in smallfiles.values():
+        if items:
+            for p, sz in items:
+                file_sizes[p] = sz
+
+    rest_out: list[Unit] = []      # stored order
+    other_out: list[Unit] = []    # stored order, stable-sorted by size at the end
+    reused = repacked = resplit = carved = dropped = 0
+
+    def member_size(p: str) -> int:
+        return size.get(p, file_sizes.get(p, 0))
+
+    def emit(units: list[Unit]) -> None:
+        for x in units:
+            (rest_out if x.kind == "rest" else other_out).append(x)
+
+    for u in prev_units:
+        if u.kind == "dir":
+            if u.path not in size:  # gone (or now skipped by the scan)
+                dropped += 1
+                continue
+            if size[u.path] >= drift:
+                emit(_split_dir(u.path, base, threshold, size, children,
+                                bigfiles, smallfiles))
+                resplit += 1
+            else:
+                u.size = float(size[u.path])
+                other_out.append(u)
+                reused += 1
+        elif u.kind == "file":
+            if not exists(u.path):
+                dropped += 1
+                continue
+            if u.path in file_sizes:
+                u.size = float(file_sizes[u.path])
+            other_out.append(u)
+            reused += 1
+        elif u.kind == "group":
+            members = [p for p in u.paths if exists(p)]
+            if not members:
+                dropped += 1
+                continue
+            pulled = [p for p in members if member_size(p) >= threshold]
+            if pulled:  # a member grew into its own territory: plan it standalone
+                for p in pulled:
+                    if p in size:
+                        emit(_split_dir(p, base, threshold, size, children,
+                                        bigfiles, smallfiles))
+                    else:
+                        emit([Unit(p, base, float(file_sizes[p]), "file")])
+                resplit += 1
+                members = [p for p in members if p not in pulled]
+                if not members:
+                    continue
+            total = sum(member_size(p) for p in members)
+            if total >= drift:  # repack only this group's members
+                bins = _pack([(p, member_size(p)) for p in members], threshold)
+                for grp in bins:
+                    emit([Unit(grp[0], list(u.excludes),
+                               float(sum(member_size(p) for p in grp)),
+                               "group", paths=grp)])
+                repacked += 1
+            else:
+                u.paths = members
+                u.size = float(total)
+                other_out.append(u)
+                reused += 1
+        elif u.kind == "rest":
+            d = u.path
+            if d not in size:
+                dropped += 1
+                continue
+            # Which scan entries are already carved out of this rest unit, and
+            # how much unexplained (new or grown) weight piled up under it.
+            match = _matcher(u.excludes)
+            covered_size = 0
+            leftover_size = 0
+            for c in children.get(d, []):
+                if match(c, os.path.basename(c)):
+                    covered_size += size.get(c, 0)
+                else:
+                    leftover_size += size.get(c, 0)
+            for fp, fs in bigfiles.get(d, []):
+                if match(fp, os.path.basename(fp)):
+                    covered_size += fs
+                else:
+                    leftover_size += fs
+            for fp, fs in (smallfiles.get(d) or []):
+                if match(fp, os.path.basename(fp)):
+                    covered_size += fs
+                else:
+                    leftover_size += fs
+            if leftover_size >= drift:
+                subs, added, extra_carved = _carve(
+                    d, base, threshold, size, children, bigfiles, smallfiles,
+                    already_carved=lambda p: match(p, os.path.basename(p)))
+                if subs:
+                    u.excludes.extend(added)
+                    emit(subs)
+                    covered_size += extra_carved
+                    carved += 1
+            u.size = float(max(size.get(d, 0) - covered_size, 0))
+            rest_out.append(u)
+            reused += 1
+        # unknown kinds (hand-edited plan file): dropped silently
+
+    other_out.sort(key=lambda u: u.size)  # stable: equal sizes keep their order
+    plan = rest_out + other_out
+    if log:
+        log(f"Split plan for {root}: reused {reused}, repacked {repacked}, "
+            f"resplit {resplit}, carved {carved}, dropped {dropped} "
+            f"-> {len(plan)} units")
+    return plan
 
 
 @dataclass
@@ -242,17 +445,35 @@ class Target:
     origin: object = None  # the configured Directory this unit came from
 
 
-def expand(directory, threshold_gib: int, log: LogFn = None) -> list:
+def expand(directory, threshold_gib: int, log: LogFn = None,
+           drift_factor: float = 2.0) -> list:
     """Configured Directory -> list of things to back up, in order.
 
     Unsplit sources come back as the original object, so behaviour (and
     cached_size bookkeeping) is identical to before for anything under T.
+    The plan for (root, threshold, base excludes) is persisted across runs and
+    reused with hysteresis, so unit path sets (and hence restic parents) stay
+    stable day to day.
     """
     try:
         if threshold_gib <= 0:
             plan = [Unit(directory.path, list(directory.excludes), 0.0, "dir")]
         else:
-            plan = build_plan(directory.path, directory.excludes, threshold_gib * GIB, log)
+            root = os.path.normpath(directory.path)
+            threshold = threshold_gib * GIB
+            prev = load_plan(root, directory.excludes, threshold)
+            if prev is not None and os.path.isdir(root):
+                size, children, bigfiles, smallfiles = scan(
+                    root, directory.excludes, threshold, log)
+                plan = plan_stable(prev, root, list(directory.excludes), threshold,
+                                   drift_factor, size, children, bigfiles, smallfiles,
+                                   log=log)
+                if not plan:  # everything in the saved plan is gone
+                    plan = plan_from_scan(root, list(directory.excludes), threshold,
+                                          size, children, bigfiles, smallfiles, log)
+            else:  # no saved plan (or unreadable root): fresh plan, old behavior
+                plan = build_plan(root, directory.excludes, threshold, log)
+            save_plan(root, directory.excludes, threshold, plan)
     except Exception as exc:  # never let sizing break a backup
         if log:
             log(f"Split planning failed for {directory.path} ({exc}); backing up whole.")
