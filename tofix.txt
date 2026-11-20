@@ -1,0 +1,282 @@
+Yes—this worked. I can review the pasted source now, and there are several concrete bugs, including two I would fix before trusting this with important backups.
+
+This is a static review: I haven’t executed the application or tests. References below use filenames and functions rather than invented line numbers.
+
+Critical/high-priority findings
+1. Deleted, then recreated files can silently disappear from future backups
+Location: restic_split.py → plan_stable()
+
+This breaks the stated guarantee that stale plans cannot drop files.
+
+When a grouped file disappears, you remove it from the group:
+
+python
+members = [p for p in u.paths if exists(p)]
+But the parent rest unit retains its exclusion for that file forever.
+
+Example:
+
+/data/a and /data/b belong to a group.
+The /data rest unit excludes both.
+Delete /data/a and run another backup. The saved group now contains only /data/b.
+Recreate /data/a.
+Subsequent planning sees /data/a as already excluded/carved, but no remaining unit owns it.
+Result: the recreated file is excluded from the rest unit and absent from all group units. Backups can finish successfully without it.
+
+The same ownership problem applies when standalone units are dropped. A directory changing into a file is another problematic case: the "dir" branch drops it because it no longer appears in the scan’s directory-size dictionary, while its parent exclusion remains.
+
+Fix: Track generated exclusions separately from user exclusions, and reconcile generated exclusions against the units that actually survive planning. Every generated exclusion needs a corresponding owner. Alternatively, retain missing-path ownership in the saved plan and decide separately which targets can run today.
+
+Regression test: Three generations—initial plan, delete and replan, recreate and replan—then verify the current generation’s snapshots cover every current file.
+
+2. “Generate random password” can destroy the only usable repository password
+Locations:
+
+restic_settings.py → _generate_password()
+restic_config.py → generate_password()
+This unconditionally overwrites the selected password file:
+
+python
+p.write_text(pw + "\n")
+There is no overwrite confirmation, no backup of the old password, and no repository-password-change operation.
+
+If that file contains the only working credential for an existing repository, clicking the button can make the backups inaccessible. Changing a repository password requires a restic key-management operation; replacing the local password file does not change the repository’s password. restic.readthedocs
+
+It also happens immediately—even if the user later clicks Cancel.
+
+Fix:
+
+Default to exclusive creation and refuse existing files.
+Treat password rotation as a separate, explicit workflow.
+Keep the old credential until the new one has been installed and verified.
+Create new secret files with mode 0600 from the outset, rather than writing first and chmodding afterward.
+Also, this line mutates the live application configuration before Save:
+
+python
+self._cfg.password_file = ...
+Use a dialog-local configuration copy.
+
+3. Partial backups are reported as fully successful and trigger retention
+Location: restic_indicator.py → _run_backup()
+
+For exit code 3, you log a warning but leave all_ok = True:
+
+python
+if rc == runner.RC_PARTIAL:
+    self._log(...)
+elif rc != runner.RC_OK:
+    all_ok = False
+Consequently, an incomplete backup:
+
+Gets a green success icon.
+Persists last_backup_ok=True.
+Runs automatic forget --prune.
+Restic’s backup exit code 3 means some source data could not be read. It is not equivalent to a complete backup. restic.readthedocs
+
+Risk: repeated incomplete backups can age out older snapshots containing the missing files.
+
+Fix: Represent complete success, partial success, failure, and cancellation separately. By default, require complete success before automatic retention; make any alternative policy explicit.
+
+4. Settings can change the repository halfway through a backup operation
+Locations: restic_indicator.py → _open_settings(), _run_backup(), _run_check()
+
+The worker repeatedly reads mutable self._cfg, while the GTK thread can replace it at any time.
+
+A concrete sequence:
+
+Backup starts against repository A.
+User saves settings pointing to repository B.
+The next split unit uses B.
+Retention and statistics may also run against B.
+The UI records the whole operation as one successful backup.
+Even without changing repositories, saving a dialog opened before a backup/check completed can restore stale timestamps or subset counters, because collect() uses the configuration captured when the dialog opened.
+
+Fix: Capture an immutable configuration snapshot for each operation and use it consistently throughout. Merge operation results into the current application state under synchronization, without replacing newer settings with stale ones.
+
+Repository-changing settings should either wait for active operations or clearly take effect only on the next operation.
+
+5. SSH setting changes are not applied to actual backups—even after restart
+Location: restic_runner.py → ensure_ssh_config()
+
+There are two independent problems:
+
+python
+if cfg.backend != "sftp" or _ssh_config_done:
+    return
+prevents updates within the process, and:
+
+python
+if marker not in existing:
+prevents updates on future launches once the alias exists.
+
+Change host/user/port/key in Settings, and the application may continue using the original SSH destination indefinitely.
+
+The connection test hides this discrepancy: it uses the current fields directly, whereas backups use the stale alias.
+
+Additionally, appending the alias after an existing Host * block can make earlier settings win. OpenSSH generally uses the first obtained value for each setting. man.openbsd
+
+Fix: Prefer application-owned SSH configuration or explicit SSH options rather than permanently appending a fixed alias to the user’s config. Ensure the connection test and backups use the same transport configuration.
+
+6. “Stop All” does not reliably stop the operation
+Locations: restic_indicator.py → _stop_and_unlock(), _run_backup(), _quit()
+
+Cancellation is checked only after a backup subprocess finishes.
+
+Specific gaps:
+
+Split scanning/planning does not check _stop_requested.
+There is no cancellation check immediately before launching each backup.
+Retention and repository statistics do not register on_proc.
+Snapshot-browser prune/forget jobs are outside the operation queue.
+Mounting is separate.
+Quit does not set _stop_requested.
+For example, pressing Stop during a lengthy split scan finds no current subprocess to terminate. Once scanning finishes, the first backup still starts.
+
+During retention, _current_proc can point to the already-finished backup process, so Stop cannot terminate the actual retention process.
+
+Fix: Use a shared cancellation token throughout planning and execution, check before every subprocess launch, and centrally register every running process. Implement bounded termination/wait/kill cleanup.
+
+Backup-view correctness
+7. Backups of / produce empty or incomplete friendly views
+Location: restic_views.py → place_targets()
+
+Root targets are explicitly skipped:
+
+python
+if path == "/":
+    continue
+But / also never appears in _ancestor_prefixes(), so _fill_corridor() does not populate it later.
+
+A snapshot whose only target is / produces an empty view.
+With / plus carved descendants, only the descendants appear; the root snapshot’s other entries disappear.
+Fix: Special-case / as a local directory whose children are populated from its owning snapshot, while respecting nested units.
+
+The fake mount’s root listing also needs correction: node + "/" becomes "//" when node == "/", so it cannot currently support this regression properly.
+
+8. bydate/ does not actually group snapshots by backup run
+Location: restic_views.py → build_bydate()
+
+The implementation groups by calendar minute, not run identity.
+
+Consequences:
+
+One split backup lasting hours becomes many separate “runs.”
+Two distinct backups within one minute are merged.
+Repeated paths within that minute keep whichever snapshot appears first in the input.
+The _2, _3 collision-handling branch is unreachable: runs is already a dictionary keyed by unique minute strings.
+Your tests explicitly assume that same minute means same run, so they lock in this limitation rather than detecting it.
+
+Fix: Generate a run ID once per backup operation, attach it to every unit snapshot, and group using that ID. Persist run metadata if unfinished/partial runs need meaningful presentation.
+
+9. Three-level nesting can show a file from the wrong snapshot
+Locations: restic_views.py → _corridor_nodes(), _fill_corridor()
+
+Consider covered targets:
+
+text
+/src
+/src/a
+/src/a/b
+The /src corridor filler traverses /src/a, even though another unit owns that subtree. If the /src snapshot contains /src/a/note.txt, it places that link first.
+
+Later, the /src/a filler sees the existing link and skips it:
+
+python
+if child_path in covered or os.path.lexists(child_local):
+    continue
+So note.txt can come from the outer, older snapshot instead of the /src/a snapshot.
+
+This can arise from historical snapshots across split-plan changes, not just the current plan.
+
+Fix: While filling an ancestor, stop at another covered target. Let the most specific owning unit fill its own corridors.
+
+Reliability and UI problems
+10. Config writes are non-atomic, and corruption silently resets everything
+Location: restic_config.py → save_config(), load_config()
+
+Saving opens the actual config file in truncating mode. An interrupted write—or concurrent saves from the UI and worker—can leave invalid JSON.
+
+Then:
+
+python
+except Exception:
+    return Config()
+silently replaces all settings with defaults, concealing the underlying error.
+
+Directory(**rd) also rejects unknown directory-level fields, unlike your forward-compatible filtering of top-level fields. One unexpected directory field discards the entire configuration.
+
+Fix: Serialize config writes, write a unique temporary file in the same directory, and atomically replace the original. Preserve a last-known-good copy. Report parse/validation failures rather than silently resetting.
+
+11. Repository initialization accesses GTK widgets from a worker thread
+Location: restic_settings.py → _do_init_repo()
+
+This worker calls:
+
+python
+cfg = self.collect()
+But collect() reads entries, spin buttons, combo boxes, and the GTK directory model.
+
+GTK calls must remain on the main thread; using a background thread for widget reads is not safe either. gnome.pages.gitlab.g...
+
+Fix: Collect and validate on the main thread in _init_repo(), then pass the resulting plain configuration object to the worker. Disable repeated initialization clicks and handle worker exceptions.
+
+12. Snapshot-browser responses can populate the wrong selected snapshot
+Location: restic_indicator.py → SnapshotBrowser
+
+Select snapshot A, then B:
+
+A’s listing starts.
+B’s listing starts.
+B finishes and displays.
+A finishes later and overwrites B’s tree.
+There is no request generation number or check that the returned data still belongs to the selected snapshot.
+
+Refresh has the same stale-response problem.
+
+Fix: Associate each request with a generation token and selected snapshot ID; ignore stale results. Clear the file tree when selection becomes empty, too.
+
+13. Failed checks can retry every minute indefinitely
+Locations: _run_check(), _run_full_check(), _check_due()
+
+last_check_ts is documented as the last attempt, but it is updated only on successful regular checks.
+
+Therefore a failed check remains due and can run again every scheduler tick.
+
+Successful full checks do not update last_check_ts at all, so a scheduled regular check can follow immediately after verifying the entire repository.
+
+Fix: Track attempt time and success time separately, add retry backoff, and count a successful full check toward the regular check schedule.
+
+14. Long-running output is retained without bounds
+Locations:
+
+restic_runner.py → run_restic(), run_backup()
+restic_status.py → LogWindow.append()
+Every backup status line is appended to lines, even when deliberately omitted from the visible log. A backup lasting days can accumulate substantial progress history in memory.
+
+The log window also grows indefinitely.
+
+Fix: Stream logs to a rotating file, retain only bounded diagnostic output, and discard routine status JSON after updating progress.
+
+There is a related mount hazard: _run_mount() stops draining the mount process’s stdout while synchronously building views and running repository-listing commands. A full pipe can block the child, so output draining should be independent of view construction. Python documents this pipe-buffer deadlock risk. Python documentation
+
+Other concrete oversights
+Vendor precedence is reversed. In main.py, repeatedly inserting candidates at sys.path[0] produces checkout → user → AppImage precedence, opposite the documented order.
+Size accounting relies on the last progress event. _run_backup() uses _current_backup_total instead of the final summary’s total_bytes_processed. The summary already provides the authoritative processed total. Also, data_added is uncompressed added data, not uploaded/compressed bytes as your return-value documentation implies. restic.readthedocs
+Directory-size caches vanish on Settings Save. collect() reconstructs every Directory without preserving cached_size.
+Operation exceptions can leave a misleading tray state. _op_worker() prints the traceback but does not set ERROR or record failure.
+Retention is repository-wide. There is no app/source/host filter, so it applies to other backups sharing the repository. Conversely, default grouping by host and paths means abandoned split-plan path groups can retain snapshots far longer than users expect. Do not “fix” this by globally disabling grouping; define an explicit ownership and retention policy first. GitHub
+The inode/exclude matcher is not merely cosmetic. _matcher() says approximation only affects sizing, but plan_stable() also uses it to decide whether paths are already carved. Escaped restic patterns are not necessarily interpreted equivalently by fnmatch; explicit ownership data would avoid this mismatch.
+Tests I would add first
+Your existing integration tests are useful, but they mostly prove coverage for one generated plan. They do not exercise the most dangerous state transitions.
+
+Priority order:
+
+Delete → backup/replan → recreate → backup/replan: verify recreated files are covered.
+Directory → file replacement: verify ownership transfers without leaving a stale exclusion.
+Partial backup: assert warning state and no automatic retention.
+Existing password file: assert generation refuses to overwrite it.
+Settings changed during an operation: assert every command still targets the original repository.
+Root target and three-level overlapping targets: verify friendly-view contents and snapshot provenance.
+Stop during planning and retention: assert no further backup command starts.
+Out-of-order browser responses: assert only the current selection is displayed.
+Bottom line: the structure is reviewable and the split/view regression tests are a good foundation, but I would not enable unattended retention until the split-ownership hole, password overwrite, partial-success handling, and operation/configuration races are fixed.

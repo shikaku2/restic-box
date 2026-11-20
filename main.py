@@ -16,7 +16,10 @@ _vendor_candidates += [
     Path.home() / ".local" / "share" / "restic-box" / "vendor",
     Path(__file__).parent / "vendor",
 ]
-for _vp in _vendor_candidates:
+# Insert reversed so the *first* candidate ends up leftmost in sys.path and
+# therefore wins: AppImage bundle > user vendor > checkout vendor, exactly the
+# documented precedence (repeated insert(0) puts the last inserted first).
+for _vp in reversed(_vendor_candidates):
     if _vp.is_dir():
         _s = str(_vp)
         if _s not in sys.path:

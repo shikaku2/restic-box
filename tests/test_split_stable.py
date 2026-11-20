@@ -150,6 +150,8 @@ class DeleteMemberTest(FixtureMixin):
     def test_only_that_group_shrinks(self):
         victim = next(g for g in self.groups if len(g.paths) >= 2)
         doomed = victim.paths[0]
+        parent = os.path.dirname(doomed)
+        drop = split.escape_pattern(doomed)
         os.remove(doomed)
         new = _stable(self.prev, self.root, self.T)
         ng = {tuple(sorted(u.paths)) for u in new if u.kind == "group"}
@@ -158,9 +160,75 @@ class DeleteMemberTest(FixtureMixin):
             if old is victim:
                 continue
             self.assertIn(tuple(sorted(old.paths)), ng)
-        # every non-group unit keeps its identity
-        self.assertEqual(sorted(_fp(u) for u in new if u.kind != "group"),
-                         sorted(_fp(u) for u in self.prev if u.kind != "group"))
+
+        # The parent "rest" unit releases exactly the deleted carve so a recreated
+        # file can never be stranded as excluded-but-unowned; every other unit and
+        # every other exclude is untouched (issue #1 ownership reconciliation).
+        prev_rest = next(u for u in self.prev if u.kind == "rest" and u.path == parent)
+        new_rest = next(u for u in new if u.kind == "rest" and u.path == parent)
+        self.assertNotIn(drop, new_rest.excludes)
+        self.assertEqual(set(new_rest.excludes) | {drop}, set(prev_rest.excludes))
+        self.assertEqual(
+            sorted(_fp(u) for u in new if u.kind not in ("group", "rest")),
+            sorted(_fp(u) for u in self.prev if u.kind not in ("group", "rest")))
+        self.assertEqual(
+            sorted(_fp(u) for u in new if u.kind == "rest" and u.path != parent),
+            sorted(_fp(u) for u in self.prev if u.kind == "rest" and u.path != parent))
+
+    def test_recreate_after_delete_is_recovered(self):
+        # Issue #1 regression: delete a group member, replan, recreate it, replan.
+        # The recreated file must be covered (owned or rest-covered), never left
+        # excluded from the parent rest unit while no unit owns it.
+        victim = next(g for g in self.groups if len(g.paths) >= 2)
+        doomed = victim.paths[0]
+        os.remove(doomed)
+        new = _stable(self.prev, self.root, self.T)
+        _write(doomed, 4 * MIB)  # recreate
+        again = _stable(new, self.root, self.T)
+        owned = any(doomed in (u.paths or [u.path]) for u in again)
+        rest_ex = [e for u in again if u.kind == "rest" for e in u.excludes]
+        excluded = split._matcher(rest_ex)(doomed, os.path.basename(doomed))
+        self.assertTrue(owned or not excluded,
+                        "recreated file is excluded from rest but owned by no unit")
+
+
+# ---------------------------------------------------------------------------
+# (c2) a carved directory replaced by a file: ownership must transfer to the
+#      parent rest unit without leaving a stale exclude behind (issue #1)
+# ---------------------------------------------------------------------------
+
+class DirToFileTest(unittest.TestCase):
+    T = 10 * MIB
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rb-d2f-")
+        self.root = os.path.join(self.tmp, "tree")
+        self.sub = os.path.join(self.root, "sub")
+        _write(os.path.join(self.sub, "one"), 6 * MIB)
+        _write(os.path.join(self.sub, "two"), 6 * MIB)
+        self.prev = split.build_plan(self.root, [], self.T)
+        # sanity: "sub" is carved as its own subtree under the root rest unit
+        self.assertTrue(any(u.path == self.sub for u in self.prev))
+        root_rest = next(u for u in self.prev if u.kind == "rest" and u.path == self.root)
+        self.assertIn(split.escape_pattern(self.sub), root_rest.excludes)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_dir_turned_into_file_is_recovered_by_rest_unit(self):
+        shutil.rmtree(self.sub)
+        _write(self.sub, 4 * MIB)  # same path, now a loose file
+        new = _stable(self.prev, self.root, self.T)
+        # the stale exclude for the (now non-directory) path is released...
+        root_rest = next(u for u in new if u.kind == "rest" and u.path == self.root)
+        self.assertNotIn(split.escape_pattern(self.sub), root_rest.excludes)
+        # ...and the file is covered: not excluded from the rest unit it lives in
+        rest_ex = [e for u in new if u.kind == "rest" for e in u.excludes]
+        excluded = split._matcher(rest_ex)(self.sub, os.path.basename(self.sub))
+        owned = any(self.sub in (u.paths or [u.path]) for u in new)
+        self.assertTrue(owned or not excluded,
+                        "dir->file path left excluded-but-unowned by the rest unit")
+
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +533,72 @@ class ResticE2ETest(FixtureMixin):
             for f in fn:
                 expected.add(os.path.join(dp, f))
         self.assertEqual(seen, expected)
+
+    def test_delete_recreate_three_generation_coverage(self):
+        """Issue #1 end-to-end: delete a grouped file, replan+backup, recreate it,
+        replan+backup, then confirm the *final* generation's snapshots cover it.
+
+        Older snapshots that already contained the file are excluded from the
+        check, so a genuine coverage hole (file excluded from the rest unit and
+        owned by no surviving unit) cannot hide behind a stale snapshot.
+        """
+        repo = os.path.join(self.tmp, "repo")
+        env = dict(os.environ, RESTIC_PASSWORD="x", RESTIC_REPOSITORY=repo)
+        subprocess.run(["restic", "init", "-q"], env=env, check=True)
+
+        def backup_all(units):
+            for u in units:
+                args = ["restic", "backup", "-q", *u.targets()]
+                for e in u.excludes:
+                    args += ["--exclude", e]
+                subprocess.run(args, env=env, check=True)
+
+        def snapshot_ids():
+            out = subprocess.run(["restic", "snapshots", "--json"], env=env,
+                                 capture_output=True, text=True, check=True).stdout
+            return {s["id"] for s in json.loads(out)}
+
+        def files_in(ids):
+            seen = set()
+            for sid in ids:
+                ls = subprocess.run(["restic", "ls", "--json", sid], env=env,
+                                    capture_output=True, text=True, check=True)
+                for line in ls.stdout.splitlines():
+                    d = json.loads(line)
+                    if d.get("type") == "file":
+                        seen.add(d["path"])
+            return seen
+
+        # Gen 1: initial plan + backup.
+        units1 = _expand_mib(self.root, self.T)
+        self.assertTrue(any(u.paths for u in units1))
+        backup_all(units1)
+
+        # Gen 2: delete one grouped file, replan, backup.
+        doomed = next(p for u in units1 if u.paths for p in u.paths)
+        os.remove(doomed)
+        units2 = _expand_mib(self.root, self.T)
+        backup_all(units2)
+
+        # Gen 3: recreate the deleted file, replan, backup.
+        _write(doomed, 4 * MIB)
+        units3 = _expand_mib(self.root, self.T)
+        before = snapshot_ids()
+        backup_all(units3)
+        new_snaps = snapshot_ids() - before
+        self.assertTrue(new_snaps, "final backup produced no snapshots")
+
+        final_files = files_in(new_snaps)
+        current_files = set()
+        for dp, _dn, fn in os.walk(self.root):
+            for f in fn:
+                current_files.add(os.path.join(dp, f))
+        missing = current_files - final_files
+        self.assertFalse(
+            doomed not in final_files and doomed in current_files,
+            f"recreated {doomed} is not covered by the final generation")
+        self.assertFalse(missing,
+                         f"final generation misses current files: {sorted(missing)[:5]}")
 
 
 def _expand_mib(root, threshold_bytes):

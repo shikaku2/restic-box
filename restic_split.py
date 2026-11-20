@@ -17,12 +17,19 @@ Rules (T = threshold):
     instead of one unfinishable unit.
   * Everything left over (including anything created later) goes into one "rest"
     unit: the directory itself with the carved children/files excluded. Coverage
-    is guaranteed by restic's own excludes, not by the scan, so a stale plan can
-    never drop files — and a directory whose file list is dropped (too many
-    entries) simply leaves its files in the rest unit.
+    comes from restic's own excludes *plus* reconciliation: every exclude a rest
+    unit carries is a carve that some surviving unit actually owns. If a carved
+    owner disappears (deleted file/dir, a directory that became a file, a dropped
+    group, or a group member removed), its exclude is released from the rest unit
+    too (see the reconcile pass in plan_stable), so a recreated path is covered
+    again instead of being left excluded-but-unowned. A directory whose file list
+    is dropped (too many entries) simply leaves its files in the rest unit.
 
 Sizes are allocated bytes (st_blocks * 512, like `du`), so sparse images count
-for what they actually hold.
+for what they actually hold. The walk streams each directory's entries
+(review fix #8): a directory with millions of entries costs one entry at a
+time, never a materialized list of them, and a directory that cannot be read
+is reported instead of pretending to be empty.
 
 Across runs the plan is saved (CONFIG_DIR/split-plans) and reused: restic only
 finds a parent snapshot on an exact path-set match, so units keep their path
@@ -41,17 +48,31 @@ import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 from restic_config import CONFIG_DIR
 
 GIB = 1024 ** 3
 
-MAX_LISTED_FILES = 50_000  # per directory; above this the small-file list is dropped
+# Per directory: above this many *small* files the planner stops remembering
+# individual paths for grouping them. It is not a limit on what gets backed up:
+# the unlisted files simply stay inside the parent directory's "rest" unit.
+MAX_LISTED_FILES = 50_000
+MAX_NOTED_ERRORS = 10        # log lines spent on unreadable paths, per scan
 MAX_UNIT_PATHS = 400       # keeps a group unit's argv manageable
 PLAN_VERSION = 1           # on-change bump invalidates all saved split plans
 
 LogFn = Optional[Callable[[str], None]]
+StopFn = Optional[Callable[[], bool]]
+
+
+class SplitCancelled(Exception):
+    """Planning was aborted because the user asked the operation to stop.
+
+    Distinct from a planning *failure*: expand() must not swallow this and fall
+    back to backing up the whole unsplit source — that is exactly what a Stop
+    is meant to prevent.
+    """
 
 
 @dataclass
@@ -76,8 +97,18 @@ def escape_pattern(path: str) -> str:
 
 
 def _matcher(patterns: list[str]) -> Callable[[str, str], bool]:
-    """Approximate restic excludes. Only used to skip work while sizing, never
-    to decide what gets backed up, so over/under-matching just skews sizes."""
+    """Approximate restic excludes. Covers two approximation jobs only:
+
+    - scan(): skip work while sizing;
+    - plan_stable(): classify scan entries that *no unit owns* — i.e. the
+      user's own excludes — when deciding drift/re-carve.
+
+    It is never the authority on what gets backed up: coverage decisions use
+    the plan's explicit unit ownership (units declare which paths they own),
+    and generated carve patterns are compared exactly, never re-interpreted
+    through fnmatch. So over/under-matching here can only skew sizes and
+    drift triggers, never coverage.
+    """
     anchored = [p.rstrip("/") for p in patterns if p.startswith("/")]
     loose = [p.rstrip("/") for p in patterns if p and not p.startswith("/")]
 
@@ -96,15 +127,71 @@ def _matcher(patterns: list[str]) -> Callable[[str, str], bool]:
     return match
 
 
-def _listdir(path: str) -> list[os.DirEntry]:
+class _DirStream:
+    """One directory's entries, pulled a single entry at a time.
+
+    Owns the scandir handle so `close()` releases it whether or not the
+    directory was ever read: scan() closes every stream it opened, including one
+    created moments before a cancellation, and an unclosed ScandirIterator keeps
+    a kernel directory handle alive until garbage collection.
+    """
+
+    __slots__ = ("path", "it", "note", "closed")
+
+    def __init__(self, path: str, it: os.ScandirIterator,
+                 note_dir_error: Callable[[str, str], None]) -> None:
+        self.path = path
+        self.it = it
+        self.note = note_dir_error
+        self.closed = False
+
+    def __iter__(self) -> "_DirStream":
+        return self
+
+    def __next__(self) -> os.DirEntry:
+        try:
+            return next(self.it)
+        except StopIteration:
+            self.close()
+            raise
+        except OSError as exc:            # readdir failed partway through
+            self.note(self.path, str(exc))
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        it, self.it = self.it, None
+        try:
+            it.close()
+        except OSError:
+            pass
+
+
+def _open_dir(path: str, note_dir_error: Callable[[str, str], None]) -> Optional[_DirStream]:
+    """Open one directory for streaming, or None when it cannot be read.
+
+    Review fix #8: nothing here builds a list. os.scandir is walked entry by
+    entry, so a directory with millions of entries costs one DirEntry at a time
+    instead of millions of them held at once.
+
+    A directory that cannot be opened used to look exactly like an empty one
+    (size 0, no children), which is a quiet lie about the user's data. It is
+    reported through note_dir_error instead.
+    """
     try:
-        with os.scandir(path) as it:
-            return list(it)
-    except OSError:
-        return []
+        it = os.scandir(path)
+    except OSError as exc:
+        note_dir_error(path, str(exc))
+        return None
+    return _DirStream(path, it, note_dir_error)
 
 
-def scan(root: str, excludes: list[str], threshold: int, log: LogFn = None):
+def scan(root: str, excludes: list[str], threshold: int, log: LogFn = None,
+         should_stop: StopFn = None, *,
+         errors: Optional[dict[str, str]] = None):
     """Iterative post-order walk. Returns (size, children, bigfiles, smallfiles)
     dicts keyed by directory path. Never follows symlinks. Always skips `.zfs`
     (touching it auto-mounts snapshots).
@@ -112,6 +199,19 @@ def scan(root: str, excludes: list[str], threshold: int, log: LogFn = None):
     bigfiles[d]  — loose files in d at or above threshold (each becomes its own unit)
     smallfiles[d] — the rest of d's loose files, or None if there were too many to
                     list (those files are then left to the "rest" unit)
+
+    should_stop: cancellation hook checked while walking (issue #6 — a Stop
+    during a long scan must abort planning before any backup is launched).
+    Every directory iterator opened so far is closed before SplitCancelled
+    propagates (review fix #8), so cancelling a long scan cannot leave kernel
+    directory handles behind.
+
+    errors: optional dict filled with "directory that could not be read" ->
+    message. Every such directory is also reported through log, and the scan
+    finishes with a summary line; an unreadable directory is never silently
+    counted as an empty one.
+
+    Raises SplitCancelled.
     """
     match = _matcher(excludes)
     size: dict[str, int] = {}
@@ -120,52 +220,114 @@ def scan(root: str, excludes: list[str], threshold: int, log: LogFn = None):
     smallfiles: dict[str, Optional[list[tuple[str, int]]]] = {}
     seen_inodes: set[tuple[int, int]] = set()
     n_entries = 0
+    unreadable_dirs: dict[str, str] = {}
+    unreadable_entries = 0
+    logged_errors = 0
     last_log = time.monotonic()
 
-    # frame: [path, entries, index, bytes, child_dirs, big_files, small_files]
-    frames = [[root, _listdir(root), 0, 0, [], [], []]]
-    while frames:
-        f = frames[-1]
-        if f[2] >= len(f[1]):
-            frames.pop()
-            size[f[0]], children[f[0]] = f[3], f[4]
-            bigfiles[f[0]], smallfiles[f[0]] = f[5], f[6]
-            if frames:
-                frames[-1][3] += f[3]
-                frames[-1][4].append(f[0])
-            continue
-        e = f[1][f[2]]
-        f[2] += 1
-        n_entries += 1
-        if log and n_entries % 5000 == 0 and time.monotonic() - last_log > 10:
-            last_log = time.monotonic()
-            log(f"Scanning {root}: {n_entries} entries, "
-                f"{(f[3] + sum(fr[3] for fr in frames[:-1])) / GIB:.0f} GiB so far")
-        if e.name == ".zfs" or match(e.path, e.name):
-            continue
-        try:
-            if e.is_dir(follow_symlinks=False):
-                frames.append([e.path, _listdir(e.path), 0, 0, [], [], []])
+    def cancelled() -> bool:
+        return should_stop is not None and should_stop()
+
+    def log_error(message: str) -> None:
+        nonlocal logged_errors
+        logged_errors += 1
+        if log and logged_errors <= MAX_NOTED_ERRORS:
+            log(message)
+
+    def note_dir_error(path: str, detail: str) -> None:
+        unreadable_dirs[path] = detail
+        log_error(f"Cannot read directory {path}: {detail}")
+
+    def note_entry_error(path: str, detail: str) -> None:
+        nonlocal unreadable_entries
+        unreadable_entries += 1
+        log_error(f"Cannot read {path}: {detail}")
+
+    def finish(frames: list, f: list) -> None:
+        """Publish one completed directory and release its directory handle."""
+        if f[1] is not None:
+            f[1].close()
+            f[1] = None
+        size[f[0]], children[f[0]] = f[2], f[3]
+        bigfiles[f[0]], smallfiles[f[0]] = f[4], f[5]
+        if frames:
+            frames[-1][2] += f[2]
+            frames[-1][3].append(f[0])
+
+    # frame: [path, entry stream, bytes, child_dirs, big_files, small_files]
+    frames = [[root, _open_dir(root, note_dir_error), 0, [], [], []]]
+    try:
+        while frames:
+            if cancelled():
+                raise SplitCancelled(f"scan of {root} cancelled")
+            f = frames[-1]
+            entry = None
+            if f[1] is not None:
+                try:
+                    entry = next(f[1])
+                except StopIteration:
+                    pass
+                except OSError:
+                    pass  # already reported; keep the partial listing's totals
+            if entry is None:
+                frames.pop()
+                finish(frames, f)
                 continue
-            st = e.stat(follow_symlinks=False)
-        except OSError:
-            continue
-        sz = st.st_blocks * 512
-        if st.st_nlink > 1:
-            key = (st.st_dev, st.st_ino)
-            if key in seen_inodes:
-                sz = 0
-            else:
-                seen_inodes.add(key)
-        f[3] += sz
-        if not stat.S_ISREG(st.st_mode):
-            continue
-        if sz >= threshold:
-            f[5].append((e.path, sz))
-        elif f[6] is not None:
-            f[6].append((e.path, sz))
-            if len(f[6]) > MAX_LISTED_FILES:
-                f[6] = None  # too many to plan individually; the rest unit covers them
+            n_entries += 1
+            if log and n_entries % 5000 == 0 and time.monotonic() - last_log > 10:
+                last_log = time.monotonic()
+                log(f"Scanning {root}: {n_entries} entries, "
+                    f"{(f[2] + sum(fr[2] for fr in frames[:-1])) / GIB:.0f} GiB so far")
+            if entry.name == ".zfs" or match(entry.path, entry.name):
+                continue
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    frames.append([entry.path, _open_dir(entry.path, note_dir_error),
+                                   0, [], [], []])
+                    continue
+                st = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                note_entry_error(entry.path, str(exc))
+                continue
+            sz = st.st_blocks * 512
+            if st.st_nlink > 1:
+                key = (st.st_dev, st.st_ino)
+                if key in seen_inodes:
+                    sz = 0
+                else:
+                    seen_inodes.add(key)
+            f[2] += sz
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if sz >= threshold:
+                f[4].append((entry.path, sz))
+            elif f[5] is not None:
+                f[5].append((entry.path, sz))
+                if len(f[5]) > MAX_LISTED_FILES:
+                    # too many to plan individually; the rest unit covers them
+                    f[5] = None
+    finally:
+        # A cancelled walk, or any unexpected failure, must not leave directory
+        # handles open in a long-lived tray process.
+        for fr in frames:
+            if fr[1] is not None:
+                try:
+                    fr[1].close()
+                except OSError:
+                    pass
+                fr[1] = None
+        if errors is not None:
+            errors.update(unreadable_dirs)
+        if log and (unreadable_dirs or unreadable_entries):
+            parts = []
+            if unreadable_dirs:
+                parts.append(f"{len(unreadable_dirs)} director"
+                             f"{'y' if len(unreadable_dirs) == 1 else 'ies'} could not be read")
+            if unreadable_entries:
+                parts.append(f"{unreadable_entries} entr"
+                             f"{'y' if unreadable_entries == 1 else 'ies'} could not be read")
+            log(f"Scan of {root}: {n_entries} entries walked; "
+                + "; ".join(parts) + f" ({logged_errors} reported)")
     return size, children, bigfiles, smallfiles
 
 
@@ -213,11 +375,13 @@ def save_plan(root: str, base_excludes: list[str], threshold_bytes: int,
         pass
 
 
-def build_plan(root: str, excludes: list[str], threshold: int, log: LogFn = None) -> list[Unit]:
+def build_plan(root: str, excludes: list[str], threshold: int, log: LogFn = None,
+               should_stop: StopFn = None) -> list[Unit]:
     root = os.path.normpath(root)
     if not os.path.isdir(root):
         return [Unit(root, list(excludes), 0.0, "dir")]
-    size, children, bigfiles, smallfiles = scan(root, excludes, threshold, log)
+    size, children, bigfiles, smallfiles = scan(root, excludes, threshold, log,
+                                                should_stop)
     return plan_from_scan(root, excludes, threshold, size, children,
                           bigfiles, smallfiles, log)
 
@@ -311,7 +475,7 @@ def plan_stable(prev_units: list[Unit], root: str, excludes: list[str], threshol
                 drift_factor: float, size: dict, children: dict, bigfiles: dict,
                 smallfiles: Optional[dict] = None,
                 exists: Callable[[str], bool] = os.path.lexists,
-                log: LogFn = None) -> list[Unit]:
+                log: LogFn = None, should_stop: StopFn = None) -> list[Unit]:
     """Re-plan reusing the saved plan (hysteresis): restic only finds a parent
     snapshot when host + path set match exactly, so untouched units must keep
     their exact path set and excludes. Only units that drifted past
@@ -321,6 +485,9 @@ def plan_stable(prev_units: list[Unit], root: str, excludes: list[str], threshol
     base = list(excludes)
     smallfiles = smallfiles if smallfiles is not None else {}
     drift = drift_factor * threshold
+
+    def cancelled() -> bool:
+        return should_stop is not None and should_stop()
     file_sizes: dict[str, int] = {}
     for items in bigfiles.values():
         for p, sz in items:
@@ -329,6 +496,32 @@ def plan_stable(prev_units: list[Unit], root: str, excludes: list[str], threshol
         if items:
             for p, sz in items:
                 file_sizes[p] = sz
+
+    # Explicit ownership for this plan generation (review oversight: the
+    # fnmatch matcher is *not* merely cosmetic if it also decides coverage —
+    # escaped restic patterns are not guaranteed to be interpreted the same
+    # way by fnmatch). A carved-off entry is one a surviving saved-plan unit
+    # *declares* it owns: dir/rest units own their path, group units own
+    # their surviving members, file units own their path. fnmatch remains
+    # only as the documented approximation for the user's own excludes,
+    # which no unit owns. A stale generated exclusion (its owner vanished
+    # or changed kind) therefore no longer masks coverage drift here, and
+    # the reconcile pass at the end releases the exclusion itself.
+    owned_raw: set[str] = set()
+
+    def own(v: Unit) -> None:
+        if v.kind == "group":
+            owned_raw.update(p for p in v.paths
+                             if p in size or p in file_sizes or exists(p))
+        elif v.kind in ("dir", "rest"):
+            if v.path in size:  # gone, or a dir that became a file: no longer owned
+                owned_raw.add(v.path)
+        elif v.kind == "file":
+            if exists(v.path):
+                owned_raw.add(v.path)
+
+    for v0 in prev_units:
+        own(v0)
 
     rest_out: list[Unit] = []      # stored order
     other_out: list[Unit] = []    # stored order, stable-sorted by size at the end
@@ -339,9 +532,12 @@ def plan_stable(prev_units: list[Unit], root: str, excludes: list[str], threshol
 
     def emit(units: list[Unit]) -> None:
         for x in units:
+            own(x)  # newly created units own their targets for later coverage checks
             (rest_out if x.kind == "rest" else other_out).append(x)
 
     for u0 in prev_units:
+        if cancelled():
+            raise SplitCancelled(f"re-planning of {root} cancelled")
         u = Unit(u0.path, list(u0.excludes), u0.size, u0.kind, list(u0.paths))  # never mutate the caller's objects
         if u.kind == "dir":
             if u.path not in size:  # gone (or now skipped by the scan)
@@ -400,30 +596,36 @@ def plan_stable(prev_units: list[Unit], root: str, excludes: list[str], threshol
                 continue
             # Which scan entries are already carved out of this rest unit, and
             # how much unexplained (new or grown) weight piled up under it.
-            match = _matcher(u.excludes)
+            user_match = _matcher(base)
+
+            def owned_entry(p: str) -> bool:
+                # Explicit plan ownership first (exact); fnmatch only for the
+                # user's own excludes, which no unit owns.
+                return p in owned_raw or user_match(p, os.path.basename(p))
+
             covered_size = 0
             leftover_size = 0
             for c in children.get(d, []):
-                if match(c, os.path.basename(c)):
+                if owned_entry(c):
                     covered_size += size.get(c, 0)
                 else:
                     leftover_size += size.get(c, 0)
             for fp, fs in bigfiles.get(d, []):
-                if match(fp, os.path.basename(fp)):
+                if owned_entry(fp):
                     covered_size += fs
                 else:
                     leftover_size += fs
             for fp, fs in (smallfiles.get(d) or []):
-                if match(fp, os.path.basename(fp)):
+                if owned_entry(fp):
                     covered_size += fs
                 else:
                     leftover_size += fs
             if leftover_size >= drift:
                 subs, added, extra_carved = _carve(
                     d, base, threshold, size, children, bigfiles, smallfiles,
-                    already_carved=lambda p: match(p, os.path.basename(p)))
+                    already_carved=owned_entry)
                 if subs:
-                    u.excludes.extend(added)
+                    u.excludes.extend(e for e in added if e not in u.excludes)
                     emit(subs)
                     covered_size += extra_carved
                     carved += 1
@@ -434,6 +636,53 @@ def plan_stable(prev_units: list[Unit], root: str, excludes: list[str], threshol
 
     other_out.sort(key=lambda u: u.size)  # stable: equal sizes keep their order
     plan = rest_out + other_out
+
+    # Reconcile generated carve excludes with the units that actually survived
+    # planning. A "rest" unit excludes every path its carved subunits own. When a
+    # carved owner vanishes this run (deleted file/dir, a directory that became a
+    # file, a dropped group unit, or a group member removed), its exclusion has to
+    # be released too: otherwise the path stays excluded from the rest unit while
+    # no remaining unit owns it, and a *recreated* path is silently dropped from
+    # every future backup. Parent snapshots are keyed on the rest unit's target
+    # (its own path), not on its exclude list, so releasing a stale exclusion here
+    # costs nothing in parent continuity.
+    #
+    # Ownership is decided from the surviving units, not from (possibly stale)
+    # exclude globs, which also removes the approximation the matcher introduced:
+    # a path is carved-off only if a live unit actually owns it.
+    base_set = set(base)
+    owned: set[str] = set()
+    for v in plan:
+        # A group unit backs up exactly its `paths`; its `path` field is only an
+        # identity anchor and may point at a member that no longer exists, so it
+        # must not be treated as owned. Non-group units own their `path`.
+        if v.kind == "group":
+            for p in v.paths:
+                owned.add(escape_pattern(p))
+        else:
+            owned.add(escape_pattern(v.path))
+
+    def _owned_entry(entry: str) -> bool:
+        return escape_pattern(entry) in owned
+
+    for r in rest_out:
+        r.excludes = [e for e in r.excludes if e in base_set or e in owned]
+        if r.path not in size:
+            continue
+        # Recompute this rest unit's own share: everything under it that no live
+        # carved unit owns stays in the rest unit's snapshot.
+        covered = 0
+        for c in children.get(r.path, []):
+            if _owned_entry(c):
+                covered += size.get(c, 0)
+        for fp, fs in bigfiles.get(r.path, []):
+            if _owned_entry(fp):
+                covered += fs
+        for fp, fs in (smallfiles.get(r.path) or []):
+            if _owned_entry(fp):
+                covered += fs
+        r.size = float(max(size.get(r.path, 0) - covered, 0))
+
     if log:
         log(f"Split plan for {root}: reused {reused}, repacked {repacked}, "
             f"resplit {resplit}, carved {carved}, dropped {dropped} "
@@ -452,7 +701,7 @@ class Target:
 
 
 def expand(directory, threshold_gib: int, log: LogFn = None,
-           drift_factor: float = 2.0) -> list:
+           drift_factor: float = 2.0, should_stop: StopFn = None) -> list:
     """Configured Directory -> list of things to back up, in order.
 
     Unsplit sources come back as the original object, so behaviour (and
@@ -460,6 +709,8 @@ def expand(directory, threshold_gib: int, log: LogFn = None,
     The plan for (root, threshold, base excludes) is persisted across runs and
     reused with hysteresis, so unit path sets (and hence restic parents) stay
     stable day to day.
+
+    A Stop request raises SplitCancelled instead of quietly planning on.
     """
     try:
         if threshold_gib <= 0:
@@ -470,16 +721,19 @@ def expand(directory, threshold_gib: int, log: LogFn = None,
             prev = load_plan(root, directory.excludes, threshold)
             if prev is not None and os.path.isdir(root):
                 size, children, bigfiles, smallfiles = scan(
-                    root, directory.excludes, threshold, log)
+                    root, directory.excludes, threshold, log, should_stop)
                 plan = plan_stable(prev, root, list(directory.excludes), threshold,
                                    drift_factor, size, children, bigfiles, smallfiles,
-                                   log=log)
+                                   log=log, should_stop=should_stop)
                 if not plan:  # everything in the saved plan is gone
                     plan = plan_from_scan(root, list(directory.excludes), threshold,
                                           size, children, bigfiles, smallfiles, log)
             else:  # no saved plan (or unreadable root): fresh plan, old behavior
-                plan = build_plan(root, directory.excludes, threshold, log)
+                plan = build_plan(root, directory.excludes, threshold, log,
+                                  should_stop)
             save_plan(root, directory.excludes, threshold, plan)
+    except SplitCancelled:
+        raise  # a Stop is not a planning error: do NOT fall back to backing up everything
     except Exception as exc:  # never let sizing break a backup
         if log:
             log(f"Split planning failed for {directory.path} ({exc}); backing up whole.")

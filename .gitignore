@@ -31,3 +31,6 @@ packaging/.restic-check-ts
 
 # OpenCode/Claude command dirs (local only; .opencode symlinks to .claude)
 .opencode
+
+# Source-review bundles (inputs, local only)
+restic-box-fixes*.zip

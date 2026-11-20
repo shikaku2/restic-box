@@ -14,6 +14,7 @@ A GTK3 system-tray applet for [restic](https://restic.net/) backups to SSH stora
 - Retention / forget policy
 - Sleep inhibition during active backups
 - Log window with live output
+- Rotating diagnostic log file, so nothing important is lost when the window trims
 
 ## Installation
 
@@ -121,6 +122,66 @@ On first run, open **Settings** from the tray menu to configure:
 - Backup directories and schedules
 
 Configuration is saved to `~/.config/restic-box/config.json`.
+
+### Logs and diagnostics
+
+The tray's log window is deliberately bounded: the last 2 000 lines, and no
+individual line longer than 4 096 characters. A backup that runs for days streams
+one progress record per file, and an unbounded window is how a log viewer stops
+responding.
+
+Anything the window trims or shortens is not simply discarded. Every operational
+line is also written to:
+
+```
+~/.config/restic-box/logs/restic-box.log
+```
+
+which rotates to `restic-box.log.1`, `restic-box.log.2`, `restic-box.log.3`,
+`restic-box.log.4` — five files of at most 2 MB each, so restic-box's own
+diagnostics can never grow past about 10 MB. When
+a single line is too large to show, the window shows its beginning plus a note
+naming this file, and the file holds the full record (excerpted to 1 MB, with the
+real size stated).
+
+Progress records themselves go to neither place: they are parsed for the tray's
+progress ring and dropped. Writing hundreds of thousands of them to disk instead
+would only move the problem.
+
+The directory is created with mode `0700` because the log quotes repository and
+source paths.
+
+### Note on retention scope
+
+Retention is applied to the **whole repository**, not just to the directories
+this machine backs up. restic groups snapshots by `(hostname, paths)`, and
+`--keep-within` and the other `--keep-*` rules are counted per group, from that
+group's own newest snapshot. Two consequences worth knowing:
+
+- A directory that used to be in the backup list and no longer is keeps its
+  newest snapshot forever. restic-box will not forget it; remove it by hand with
+  `restic forget <snapshot-id>`.
+- Snapshots taken by another machine (a shared repository) are counted in their
+  own groups too, so retention here cannot accidentally decide how many of those
+  survive.
+
+### Note on per-repository bookkeeping
+
+"Last backup" and "last check" describe a **specific repository combined with a
+specific set of source directories**. restic-box keeps every such combination's
+outcomes in a small history inside its config file, keyed by a fingerprint of
+the repository (backend, host, path, credentials) plus the enabled source
+paths and excludes.
+
+- If you change the repository or the source list while a backup or check is
+  running, its result is credited to the configuration it actually used — the
+  newly selected repository is *not* marked as backed up, and its schedule
+  treats it as never backed up.
+- Switching back to an earlier repository/sources restores that combination's
+  own timestamps, subset rotation, and size statistics from history.
+- Changing only scheduling, retention, compression, or split settings does not
+  change the fingerprint, so a repository does not lose its "backed up" status
+  because you retuned those options.
 
 ### Note on network shares (CIFS/SMB/NFS)
 

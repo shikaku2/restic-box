@@ -294,31 +294,28 @@ class SettingsDialog(Gtk.Dialog):
 
     def _do_sftp_test_connection(self, cfg: cfg_mod.Config) -> None:
         ok = False
-        cmd = [
-            "ssh",
-            "-p", str(cfg.ssh_port),
-            "-i", str(Path(cfg.ssh_key).expanduser()),
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=10",
-            f"{cfg.ssh_user}@{cfg.ssh_host}",
-            "echo OK",
-        ]
-        self._on_log(f"[test-connection] cmd: {' '.join(cmd)}")
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            # The exact transport the backups use — restic's sftp.command, which
+            # opens the server's SFTP subsystem — and the exact same pass/fail
+            # rule as the reachability pre-flight the worker runs before every
+            # operation: runner.classify_ssh_probe (issue #5, review fixes #4 and
+            # #7). A passed test and a real backup mean the same connection: both
+            # ask for the subsystem, neither asks for a shell.
+            cmd = runner.ssh_probe_command(cfg)
+            self._on_log(f"[test-connection] cmd: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL,
+                                    timeout=runner.SSH_PROBE_TIMEOUT)
             self._on_log(f"[test-connection] rc={result.returncode}")
             if result.stdout:
                 self._on_log(f"[test-connection] stdout: {result.stdout.strip()}")
             if result.stderr:
                 self._on_log(f"[test-connection] stderr: {result.stderr.strip()}")
-            # SSH exits 255 on its own errors (unreachable, auth failure, bad key).
-            # Any other rc means SSH connected and authenticated; the remote may
-            # reject arbitrary commands (Hetzner storage boxes do this) and that's fine.
-            auth_failed = any(s in result.stderr for s in ("Permission denied", "Authentication failed"))
-            ok = not auth_failed and result.returncode != 255
+            ok, reason = runner.classify_ssh_probe(result.returncode, result.stderr)
+            if not ok:
+                self._on_log(f"[test-connection] {reason}")
         except subprocess.TimeoutExpired:
-            self._on_log("[test-connection] timed out after 15s")
+            self._on_log(f"[test-connection] timed out after {runner.SSH_PROBE_TIMEOUT}s")
         except Exception as e:
             self._on_log(f"[test-connection] exception: {e}")
         self._on_log(f"[test-connection] result: {'OK' if ok else 'FAILED'}")
@@ -386,6 +383,7 @@ class SettingsDialog(Gtk.Dialog):
 
         btn_init = Gtk.Button(label="Initialize Repository (first time only)")
         btn_init.connect("clicked", self._init_repo)
+        self._btn_init = btn_init
         g.attach(btn_init, 1, 5, 1, 1)
 
         self._lbl_init = Gtk.Label(label="")
@@ -401,24 +399,73 @@ class SettingsDialog(Gtk.Dialog):
         self._pick_path(self._e_pwfile, "Select password file", Gtk.FileChooserAction.SAVE)
 
     def _generate_password(self, _btn: Gtk.Button) -> None:
-        self._cfg.password_file = self._e_pwfile.get_text().strip()
-        pw = cfg_mod.generate_password(self._cfg)
-        self._lbl_pw_status.set_text(f"Generated & saved ({len(pw)} chars)")
+        # Work on a dialog-local copy; never mutate the live application config
+        # before the user actually clicks Save.
+        local = dataclasses.replace(self._cfg,
+                                    password_file=self._e_pwfile.get_text().strip())
+        if not local.password_file:
+            self._lbl_pw_status.set_text("Choose a password file first")
+            return
+        p = cfg_mod.password_file_path(local)
+        if cfg_mod.password_file_exists(local):
+            dlg = Gtk.MessageDialog(
+                transient_for=self, flags=0,
+                message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.OK,
+                text="Password file already exists — generation refused.",
+            )
+            dlg.format_secondary_text(
+                f"{p}\n\nThis button creates a brand-new password. Overwriting it "
+                "would not change an existing repository's password (that is a "
+                "separate key-management step) and would make the current "
+                "backups unreadable. Your existing password file was left "
+                "untouched."
+            )
+            dlg.run()
+            dlg.destroy()
+            self._lbl_pw_status.set_text("Password file: EXISTS (unchanged)")
+            return
+        try:
+            pw = cfg_mod.generate_password(local)
+        except FileExistsError:
+            self._lbl_pw_status.set_text("Password file appeared — not overwritten")
+        except OSError as exc:
+            self._show_error(f"Could not create password file: {exc}")
+        else:
+            self._lbl_pw_status.set_text(f"Generated & saved ({len(pw)} chars)")
 
     def _init_repo(self, _btn: Gtk.Button) -> None:
-        self._lbl_init.set_text("Initializing…")
-        threading.Thread(target=self._do_init_repo, daemon=True).start()
-
-    def _do_init_repo(self) -> None:
+        # Issue #11: collect() reads GTK widgets and must run on the main
+        # thread. Collect here, then hand the worker a plain Config; the
+        # worker only reports back through GLib.idle_add.
         cfg = self.collect()
-        print(f"[init-repo] repo: {runner.repo_url(cfg)}", flush=True)
-        print(f"[init-repo] password-file: {cfg_mod.password_file_path(cfg)} exists={cfg_mod.password_file_exists(cfg)}", flush=True)
-        def on_line(line: str) -> None:
-            print(f"[init-repo] {line}", flush=True)
-        rc, _out = runner.init_repo(cfg, on_output=on_line)
-        print(f"[init-repo] rc={rc}", flush=True)
-        msg = "Init OK" if rc == 0 else f"Init failed (rc={rc})"
-        GLib.idle_add(self._lbl_init.set_text, msg)
+        self._btn_init.set_sensitive(False)  # no repeated init clicks mid-flight
+        self._lbl_init.set_text("Initializing…")
+        threading.Thread(target=self._do_init_repo, args=(cfg,), daemon=True).start()
+
+    def _do_init_repo(self, cfg: cfg_mod.Config) -> None:
+        # Review fix #2: EVERYTHING that can raise — the diagnostic prints and
+        # URL building included — lives inside the try, and the completion
+        # handoff runs exactly once on both success and failure. An early
+        # exception used to kill the worker thread before _init_repo_done(),
+        # leaving the Initialize button disabled and the label stuck on
+        # "Initializing…" with no way to retry.
+        msg = "Init failed"
+        try:
+            print(f"[init-repo] repo: {runner.repo_url(cfg)}", flush=True)
+            print(f"[init-repo] password-file: {cfg_mod.password_file_path(cfg)} exists={cfg_mod.password_file_exists(cfg)}", flush=True)
+            def on_line(line: str) -> None:
+                print(f"[init-repo] {line}", flush=True)
+            rc, _out = runner.init_repo(cfg, on_output=on_line)
+            msg = "Init OK" if rc == 0 else f"Init failed (rc={rc})"
+        except Exception as exc:  # e.g. invalid connection settings: report, don't die silently
+            msg = f"Init failed: {exc}"
+        GLib.idle_add(self._init_repo_done, msg)
+
+    def _init_repo_done(self, msg: str) -> bool:
+        """Main-thread completion: report and allow a retry."""
+        self._lbl_init.set_text(msg)
+        self._btn_init.set_sensitive(True)
+        return False  # GLib source removed
 
     # --- directories tab ---
 
@@ -770,12 +817,40 @@ class SettingsDialog(Gtk.Dialog):
 
         note = Gtk.Label()
         note.set_markup(
-            "<i>Keeps snapshots within the specified age of the newest snapshot.\n"
-            "All older snapshots are forgotten and their data pruned.\n"
-            "Set only the components you need — zero values are omitted.</i>"
+            "<i>Keeps snapshots within the specified age of the newest snapshot in each\n"
+            "snapshot group. All older snapshots are forgotten and their data pruned.\n"
+            "Set only the components you need — zero values are omitted. Units restic\n"
+            "accepts are years, months, days, hours.</i>"
         )
         note.set_xalign(0)
         g.attach(note, 0, 1, 3, 1)
+
+        # Review fix #3: the ownership policy and restic's real default
+        # grouping + window semantics (verified against real restic in
+        # tests/test_retention_scope.py) are stated explicitly so enabling
+        # retention is an informed decision.
+        policy = Gtk.Label()
+        policy.set_markup(
+            "<b>Ownership:</b> restic-box manages the whole repository it is configured "
+            "with.\n"
+            "Retention sends no host/path/tag filters, so every snapshot in that "
+            "repository\n"
+            "is subject to the age window — including ones stored by other tools or "
+            "machines if\n"
+            "you share the repository.\n"
+            "<b>Grouping:</b> snapshots are grouped by (host, paths); tags only count if "
+            "--group-by\n"
+            "tag is asked for, which restic-box never does. The window is measured "
+            "per group,\n"
+            "from that group's own newest snapshot; older ones in the group are "
+            "forgotten and pruned.\n"
+            "<b>Note:</b> a path you later remove from the source list keeps its newest "
+            "snapshot\n"
+            "forever — remove it with Forget + Prune in the snapshot browser."
+        )
+        policy.set_xalign(0)
+        policy.set_line_wrap(True)
+        g.attach(policy, 0, 7, 3, 1)
 
         fields = [("Years:", "retention_years"), ("Months:", "retention_months"),
                   ("Days:", "retention_days"),  ("Hours:", "retention_hours")]

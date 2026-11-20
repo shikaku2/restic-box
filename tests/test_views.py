@@ -80,12 +80,15 @@ class FakeMount:
 
     def ls_children(self, snap_id: str, node: str) -> list[tuple[str, bool]]:
         node = "/" + node.strip("/")
+        # At the tree root `node + "/"` would be "//" and never match, so root
+        # children need their own assembly (issue #7 regression harness).
+        prefix = node if node == "/" else node + "/"
         children: dict[str, bool] = {}
         for path, is_dir in self.trees.get(snap_id, {}).items():
-            if path == node or not path.startswith(node + "/"):
+            if path == node or not path.startswith(prefix):
                 continue
-            rest = path[len(node) + 1:]
-            if "/" in rest:
+            rest = path[1:] if node == "/" else path[len(node) + 1:]
+            if not rest or "/" in rest:
                 continue
             children[rest] = is_dir
         return sorted(children.items())
@@ -305,19 +308,21 @@ class LsChildrenParsingTest(unittest.TestCase):
 
     def _call(self, canned: str, path: str) -> tuple[list, list]:
         calls: list[list] = []
-        original = runner.run_restic
+        original = runner._query_lines
 
-        def fake(args, cfg, on_output=None, on_proc=None):
+        def fake(args, cfg, on_line, on_output=None, on_proc=None):
             calls.append(args)
-            return 0, canned
+            for line in canned.splitlines():
+                on_line(line)                 # streamed, as the real reader does
+            return 0
 
-        runner.run_restic = fake
+        runner._query_lines = fake
         try:
             cfg = Config(backend="local", repo_path="/tmp/unused")
             children = runner.run_ls_children(cfg, "abcd1234", path)
             return calls[0], children
         finally:
-            runner.run_restic = original
+            runner._query_lines = original
 
     def test_only_direct_children_are_returned(self):
         args, children = self._call(self.CANNED, STORAGE)
